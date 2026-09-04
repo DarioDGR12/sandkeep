@@ -4,7 +4,7 @@ Sandbox de ejecución de código para agentes de IA (Cursor, Devin, agentes prop
 
 Este repositorio se llama `sandkeep`. El binario y el producto se llaman **Warden**: es la capa de seguridad entre el agente y el host real.
 
-> Fase 1 (esta sesión): esqueleto compilable, API REST, pipeline de aislamiento con **stubs claros**, auditoría y tests. **No ejecuta código de agente en el host.** El backend `stub` solo simula el ciclo de vida de una microVM. Firecracker se cablea en la siguiente fase.
+> Fase 2: el backend `firecracker` ya habla con el VMM real (API Unix socket, vsock, guest-agent). El default sigue siendo `stub` para no exigir `/dev/kvm`. Con assets en `assets/` y `WARDEN_RUNTIME=firecracker`, `/execute` corre el código **dentro** de la microVM.
 
 ## Por qué existe
 
@@ -31,17 +31,20 @@ El módulo Go está en la **raíz del repo** (no en una carpeta `warden/`). Así
 
 ```
 .
-├── cmd/warden/            # main: env, señales, listen 0.0.0.0:$PORT
+├── cmd/warden/            # control plane HTTP
+├── cmd/guest-agent/       # PID 1 dentro de la microVM (vsock :52)
 ├── internal/
-│   ├── api/               # HTTP: POST /execute, GET /health
-│   ├── runtime/           # interfaz Runtime + stub + placeholder Firecracker
-│   ├── resources/         # perfiles cgroups + seccomp
+│   ├── api/               # POST /execute, GET /health
+│   ├── runtime/           # Stub + Firecracker (API socket, vsock, lifecycle)
+│   ├── guestproto/        # contrato JSON host↔guest
+│   ├── resources/         # cgroups v2 + perfiles seccomp
 │   ├── network/           # egress fail-closed
-│   ├── snapshot/          # save/restore (fase 2, no implementado)
-│   └── audit/             # JSONL + logger en memoria para tests
-├── configs/               # cgroups.json, seccomp.json, egress.json
-├── go.mod
-└── README.md
+│   ├── snapshot/          # save/restore (aún no)
+│   └── audit/             # JSONL
+├── configs/               # cgroups, seccomp, egress, firecracker.json
+├── scripts/               # fetch-assets, build-rootfs, setup-kvm
+├── assets/                # kernel, rootfs, firecracker (no se commitean)
+└── go.mod
 ```
 
 `internal/` no se puede importar desde otro módulo. El compilador de Go lo impide. Para un producto de seguridad eso es una frontera real, no una convención.
@@ -60,8 +63,8 @@ Si el stub corriera `python -c ...` en el proceso de Warden, el MVP sería el ag
 **4. Fail-closed en red y seccomp.**
 `configs/egress.json` tiene allowlist vacía y `default_policy: deny`. El loader **rechaza** `default_policy: allow`. El perfil seccomp exige `SCMP_ACT_ERRNO` o kill, nunca allow-by-default.
 
-**5. Solo stdlib.**
-`net/http`, `encoding/json`, `log/slog`, `context`. Cero dependencias externas mientras aprendemos el dominio. Un router o un cliente de Firecracker se añaden cuando hagan falta.
+**5. Cliente Firecracker propio, stdlib en el host.**
+El host habla HTTP sobre un Unix socket (como documenta Firecracker) y vsock con el handshake `CONNECT <port>\n` / `OK …`. La única dependencia extra es `golang.org/x/sys` para que el **guest-agent** haga `AF_VSOCK` dentro de la VM.
 
 **6. HTTP 200 = el sandbox terminó.**
 Exit code ≠ 0 y timeout de guest son resultados válidos para un agente (`exit_code`, `timed_out`). 4xx/5xx significa que **Warden** rechazó o no pudo arrancar el job.
@@ -131,9 +134,11 @@ Variables de entorno:
 | Variable | Default | Qué hace |
 | --- | --- | --- |
 | `PORT` / `WARDEN_ADDR` | `8080` / `0.0.0.0:8080` | Listen |
-| `WARDEN_RUNTIME` | `stub` | `stub` o `firecracker` (este último falla cerrado) |
-| `WARDEN_CONFIG_DIR` | `configs` | Perfiles |
+| `WARDEN_RUNTIME` | `stub` | `stub` o `firecracker` |
+| `WARDEN_CONFIG_DIR` | `configs` | Perfiles + `firecracker.json` |
 | `WARDEN_AUDIT_LOG` | `audit.jsonl` | Log JSONL |
+| `WARDEN_FC_BINARY` / `_KERNEL` / `_ROOTFS` | `assets/…` | Override de paths |
+| `WARDEN_CGROUP_REQUIRED` | unset | Si es `1`, Boot falla cuando no se puede crear el cgroup |
 
 ```bash
 curl -s localhost:8080/health
@@ -147,24 +152,44 @@ curl -s -X POST localhost:8080/execute \
 ```
 POST /execute
   → validar JSON y contrato
-  → Limiter.Apply (cgroups + seccomp; hoy noop documentado)
-  → Runtime.Boot (microVM nueva)
-  → Instance.Execute (código en el guest)
-  → defer Instance.Destroy (siempre)
-  → Audit.Record (éxito o error)
+  → Limiter.Apply (validación de perfil)
+  → Runtime.Boot
+        Firecracker: spawn VMM → cgroup al PID → API configure
+        → sin NIC si allowlist vacía → InstanceStart
+        → wait vsock + guest-agent
+  → Instance.Execute (JSON por vsock; el guest exec python/node)
+  → defer Instance.Destroy (SendCtrlAltDel, SIGKILL, borrar workdir)
+  → Audit.Record
   → JSON al agente
 ```
 
-`session_id` ya viaja por el pipeline. `internal/snapshot` es el hueco de fase 2 para `Save` / `Restore` en vez de boot en frío.
+El timeout de `POST /execute` cubre **solo el job**. El boot de la VM tiene su propio presupuesto (20s).
+
+### Levantar Firecracker de verdad
+
+```bash
+./scripts/setup-kvm.sh
+./scripts/fetch-assets.sh
+./scripts/build-rootfs.sh          # sudo: apk en chroot + mkfs.ext4
+WARDEN_RUNTIME=firecracker go run ./cmd/warden
+```
+
+Decisiones de fase 2 que importan:
+
+- **Sin TAP.** Allowlist vacía ⇒ no se crea interfaz de red. El guest no tiene L3. Eso *es* el filtro de egress. Si la allowlist tiene entradas, Boot **falla** (no mentimos con una VM “con red”).
+- **seccomp del VMM ≠ seccomp del guest.** Firecracker ya trae un filtro estricto para el proceso VMM (KVM ioctls). No le aplicamos `configs/seccomp.json`; ese perfil es para el jailer (siguiente paso).
+- **cgroups al PID de Firecracker**, no a un nombre compartido `pending-vm`. En contenedores sin cgroup delegado el attach es best-effort (`WARDEN_CGROUP_REQUIRED=1` para fail-closed).
+- **guest-agent es PID 1** (`init=/usr/local/bin/guest-agent`). Monta proc/sys/dev y escucha vsock :52.
+- **Una copia del rootfs por VM** para no compartir escrituras. Pesado; snapshots/reflink vienen después.
 
 ## Lo que esto NO es (aún)
 
-- No hay Firecracker real ni rootfs/kernel empaquetados
-- No hay authn (API key, mTLS) — no exponer esto a Internet
-- No hay rate limit ni cola de VMs
-- No hay snapshots de sesión
-- El filtro de egress se consulta, no se programa en iptables
-- El limiter no llama a `cgroup.controllers` todavía
+- Jailer (chroot + uid drop + seccomp custom del VMM)
+- TAP + iptables para una allowlist no vacía
+- Authn (API key, mTLS) — no exponer esto a Internet
+- Rate limit ni cola de VMs
+- Snapshots de sesión (`internal/snapshot`)
+- Auditoría durable (el JSONL se pierde en cada deploy)
 
 ## Licencia
 

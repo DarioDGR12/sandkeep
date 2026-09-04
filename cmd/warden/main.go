@@ -60,21 +60,44 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if backend == "firecracker" {
+		fcCfg, err := runtime.LoadConfig(filepath.Join(cfgDir, "firecracker.json"))
+		if err != nil {
+			return fmt.Errorf("load firecracker config: %w", err)
+		}
+		fcCfg.Cgroup = resources.CgroupV2{
+			Log:     log,
+			Require: os.Getenv("WARDEN_CGROUP_REQUIRED") == "1",
+		}
+		rt = runtime.NewFirecrackerWithConfig(fcCfg)
+	}
 
+	cgroupLimiter := resources.NoopLimiter{Log: log}
 	srv := api.NewServer(api.DefaultConfig(listen), api.Dependencies{
-		Runtime:   rt,
-		Limiter:   resources.NoopLimiter{Log: log},
-		Limits:    limits,
-		Seccomp:   seccomp,
-		Network:   netFilter,
-		Audit:     audit.NewJSONLLogger(auditPath),
-		Snapshots: snapshot.Unsupported{},
-		Log:       log,
+		Runtime:     rt,
+		Limiter:     cgroupLimiter,
+		Limits:      limits,
+		Seccomp:     seccomp,
+		Network:     netFilter,
+		Audit:       audit.NewJSONLLogger(auditPath),
+		Snapshots:   snapshot.Unsupported{},
+		Log:         log,
+		BootTimeout: 20 * time.Second,
 	})
+
+	ready := "unknown"
+	if r, ok := rt.(interface{ Ready() error }); ok {
+		if err := r.Ready(); err != nil {
+			ready = err.Error()
+		} else {
+			ready = "yes"
+		}
+	}
 
 	log.Info("warden starting",
 		"addr", listen,
 		"backend", rt.Name(),
+		"ready", ready,
 		"config_dir", cfgDir,
 		"audit_log", auditPath,
 		"egress_allowlist", len(netPolicy.Allowlist),

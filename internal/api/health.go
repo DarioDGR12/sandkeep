@@ -5,6 +5,11 @@ import "net/http"
 type healthResponse struct {
 	Status  string `json:"status"`
 	Backend string `json:"backend"`
+	Ready   bool   `json:"ready"`
+}
+
+type readier interface {
+	Ready() error
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -12,8 +17,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, requestIDFrom(r.Context()), http.StatusMethodNotAllowed, CodeMethodNotAllow, "method not allowed")
 		return
 	}
+	ready := true
+	if rdy, ok := s.deps.Runtime.(readier); ok {
+		ready = rdy.Ready() == nil
+	}
+	status := "ok"
+	if !ready {
+		status = "degraded"
+	}
 	writeJSON(w, http.StatusOK, healthResponse{
-		Status:  "ok",
+		Status:  status,
 		Backend: s.deps.Runtime.Name(),
+		Ready:   ready,
 	})
 }

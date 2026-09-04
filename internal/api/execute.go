@@ -49,10 +49,7 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(req.Timeout)*time.Second)
-	defer cancel()
-
-	res, execErr := s.run(ctx, req)
+	res, execErr := s.run(r.Context(), req)
 	durationMS := time.Since(started).Milliseconds()
 
 	s.recordAudit(req, requestID, res, durationMS, execErr)
@@ -88,7 +85,11 @@ func (s *Server) run(ctx context.Context, req ExecuteRequest) (runtime.Result, e
 		}
 	}
 
-	inst, err := s.deps.Runtime.Boot(ctx, spec)
+	bootTimeout := s.bootTimeout()
+	bootCtx, bootCancel := context.WithTimeout(ctx, bootTimeout)
+	defer bootCancel()
+
+	inst, err := s.deps.Runtime.Boot(bootCtx, spec)
 	if err != nil {
 		return runtime.Result{}, err
 	}
@@ -101,10 +102,19 @@ func (s *Server) run(ctx context.Context, req ExecuteRequest) (runtime.Result, e
 		}
 	}()
 
-	return inst.Execute(ctx, runtime.ExecRequest{
+	execCtx, execCancel := context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
+	defer execCancel()
+	return inst.Execute(execCtx, runtime.ExecRequest{
 		Code:    req.Code,
 		Timeout: time.Duration(req.Timeout) * time.Second,
 	})
+}
+
+func (s *Server) bootTimeout() time.Duration {
+	if s.deps.BootTimeout > 0 {
+		return s.deps.BootTimeout
+	}
+	return 20 * time.Second
 }
 
 func (s *Server) recordAudit(req ExecuteRequest, requestID string, res runtime.Result, durationMS int64, execErr error) {
@@ -136,8 +146,8 @@ func (s *Server) recordAudit(req ExecuteRequest, requestID string, res runtime.R
 }
 
 func mapExecError(err error) (status int, code, msg string) {
-	if errors.Is(err, runtime.ErrNotImplemented) {
-		return http.StatusServiceUnavailable, CodeUnavailable, "firecracker backend is not wired yet"
+	if errors.Is(err, runtime.ErrNotImplemented) || errors.Is(err, runtime.ErrMissingAssets) {
+		return http.StatusServiceUnavailable, CodeUnavailable, "firecracker backend is not ready"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return http.StatusGatewayTimeout, CodeInternal, "execution timed out before a VM result"

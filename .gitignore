@@ -13,6 +13,14 @@ vendor/
 *.log
 audit.jsonl
 
+# Firecracker assets (kernel, rootfs, binaries) — fetch/build via scripts/
+/assets/firecracker
+/assets/jailer
+/assets/vmlinux
+/assets/vmlinux.bin
+/assets/rootfs.ext4
+/bin/guest-agent
+
 # IDE / OS
 .idea/
 .vscode/

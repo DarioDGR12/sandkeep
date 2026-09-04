@@ -22,6 +22,9 @@ func NewStub() *Stub {
 // Name implements Runtime.
 func (*Stub) Name() string { return "stub" }
 
+// Ready implements a health probe. The stub is always ready.
+func (*Stub) Ready() error { return nil }
+
 // Boot allocates a fake VM id. Limits and network policy are accepted so the
 // real pipeline path is exercised even without KVM.
 func (s *Stub) Boot(_ context.Context, spec Spec) (Instance, error) {

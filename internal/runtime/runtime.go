@@ -6,12 +6,17 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/DarioDGR12/sandkeep/internal/network"
 	"github.com/DarioDGR12/sandkeep/internal/resources"
 )
+
+// ErrNotImplemented is kept for features that still fail closed (jailer, TAP).
+var ErrNotImplemented = errors.New("firecracker feature is not implemented yet")
 
 // Supported guest language runtimes for phase 1.
 const (
@@ -74,7 +79,15 @@ func New(kind string) (Runtime, error) {
 	case "", "stub":
 		return NewStub(), nil
 	case "firecracker":
-		return NewFirecracker(), nil
+		cfgPath := os.Getenv("WARDEN_FC_CONFIG")
+		if cfgPath == "" {
+			cfgPath = "configs/firecracker.json"
+		}
+		cfg, err := LoadConfig(cfgPath)
+		if err != nil {
+			return nil, err
+		}
+		return NewFirecrackerWithConfig(cfg), nil
 	default:
 		return nil, fmt.Errorf("unknown runtime %q (want stub or firecracker)", kind)
 	}

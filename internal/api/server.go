@@ -41,14 +41,15 @@ func DefaultConfig(addr string) Config {
 // Dependencies are the isolation and observability backends. All of them are
 // interfaces so tests inject fakes and production can swap Firecracker in.
 type Dependencies struct {
-	Runtime   runtime.Runtime
-	Limiter   resources.Limiter
-	Limits    resources.Profile
-	Seccomp   resources.SeccompProfile
-	Network   network.Filter
-	Audit     audit.Logger
-	Snapshots snapshot.Store
-	Log       *slog.Logger
+	Runtime     runtime.Runtime
+	Limiter     resources.Limiter
+	Limits      resources.Profile
+	Seccomp     resources.SeccompProfile
+	Network     network.Filter
+	Audit       audit.Logger
+	Snapshots   snapshot.Store
+	Log         *slog.Logger
+	BootTimeout time.Duration
 }
 
 // Server is the HTTP API.
