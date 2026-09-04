@@ -248,7 +248,7 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 	}
 	if err := inst.whileAlive(ctx, func() error {
 		return inst.client.configure(ctx,
-			fcMachineConfig{VCPUCount: f.cfg.VCPUCount, MemSizeMiB: memMiB, SMT: false},
+			fcMachineConfig{VCPUCount: f.cfg.VCPUCount, MemSizeMiB: memMiB, SMT: false, TrackDirtyPages: true},
 			fcBootSource{KernelImagePath: paths.guestKernel, BootArgs: bootArgs},
 			fcDrive{DriveID: "rootfs", PathOnHost: paths.guestRootfs, IsRootDevice: true, IsReadOnly: false},
 			fcVsock{GuestCID: inst.cid, UDSPath: paths.guestVsock},

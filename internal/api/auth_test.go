@@ -2,15 +2,20 @@ package api_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/DarioDGR12/sandkeep/internal/api"
 	"github.com/DarioDGR12/sandkeep/internal/audit"
@@ -133,5 +138,62 @@ func TestHealthDoesNotRequireAPIKey(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("health must stay public: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExecuteAcceptsJWT(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := base64.RawURLEncoding.EncodeToString(key.N.Bytes())
+		e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes())
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"keys": []map[string]string{{"kty": "RSA", "kid": "k1", "n": n, "e": e}},
+		})
+	}))
+	t.Cleanup(jwks.Close)
+
+	filter, err := network.NewStaticFilter(network.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := api.DefaultConfig("127.0.0.1:0")
+	cfg.JWT = &api.JWTVerifier{
+		JWKSURL:  jwks.URL,
+		Issuer:   "https://issuer.test",
+		Audience: "warden",
+		Client:   jwks.Client(),
+	}
+	srv := api.NewServer(cfg, api.Dependencies{
+		Runtime: runtime.NewStub(),
+		Limiter: resources.NoopLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Limits:  resources.DefaultProfile(),
+		Seccomp: resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO"},
+		Network: filter,
+		Audit:   &audit.MemoryLogger{},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing jwt status=%d", rec.Code)
+	}
+
+	tok := signJWT(t, key, "k1", map[string]any{
+		"iss": "https://issuer.test",
+		"aud": "warden",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	req = httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python"}`))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("jwt status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

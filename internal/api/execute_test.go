@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -162,6 +163,36 @@ func TestExecuteBodyTooLarge(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestExecuteAuditStrictIs500(t *testing.T) {
+	filter, err := network.NewStaticFilter(network.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := api.NewServer(api.DefaultConfig("127.0.0.1:0"), api.Dependencies{
+		Runtime:     runtime.NewStub(),
+		Limiter:     resources.NoopLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Limits:      resources.DefaultProfile(),
+		Seccomp:     resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO"},
+		Network:     filter,
+		Audit:       failAudit{},
+		AuditStrict: true,
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), api.CodeAuditFailed) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+type failAudit struct{}
+
+func (failAudit) Record(audit.Event) error { return fmt.Errorf("sink down") }
 
 func TestExecuteBusyIs429(t *testing.T) {
 	h := testServer(t, busyRuntime{}, nil)

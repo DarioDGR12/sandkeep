@@ -31,19 +31,19 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 			writeError(w, requestID, http.StatusRequestEntityTooLarge, CodeBodyTooLarge, "request body too large")
 			return
 		}
-		s.recordAudit(req, requestID, runtime.Result{}, 0, err)
+		_ = s.recordAudit(r.Context(), req, requestID, runtime.Result{}, 0, err)
 		writeError(w, requestID, http.StatusBadRequest, CodeInvalidJSON, "invalid JSON body")
 		return
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		trail := fmt.Errorf("trailing data after JSON object")
-		s.recordAudit(req, requestID, runtime.Result{}, 0, trail)
+		_ = s.recordAudit(r.Context(), req, requestID, runtime.Result{}, 0, trail)
 		writeError(w, requestID, http.StatusBadRequest, CodeInvalidJSON, "invalid JSON body")
 		return
 	}
 
 	if err := validateExecute(&req); err != nil {
-		s.recordAudit(req, requestID, runtime.Result{}, 0, err)
+		_ = s.recordAudit(r.Context(), req, requestID, runtime.Result{}, 0, err)
 		writeError(w, requestID, http.StatusBadRequest, CodeInvalidRequest, err.Error())
 		return
 	}
@@ -52,7 +52,7 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	res, execErr := s.run(r.Context(), req)
 	durationMS := time.Since(started).Milliseconds()
 
-	s.recordAudit(req, requestID, res, durationMS, execErr)
+	auditErr := s.recordAudit(r.Context(), req, requestID, res, durationMS, execErr)
 
 	if execErr != nil {
 		s.deps.Log.Error("execute failed",
@@ -62,6 +62,10 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		)
 		status, code, msg := mapExecError(execErr)
 		writeError(w, requestID, status, code, msg)
+		return
+	}
+	if auditErr != nil && s.deps.AuditStrict {
+		writeError(w, requestID, http.StatusInternalServerError, CodeAuditFailed, "audit sink failed")
 		return
 	}
 
@@ -120,9 +124,9 @@ func (s *Server) bootTimeout() time.Duration {
 	return 20 * time.Second
 }
 
-func (s *Server) recordAudit(req ExecuteRequest, requestID string, res runtime.Result, durationMS int64, execErr error) {
+func (s *Server) recordAudit(ctx context.Context, req ExecuteRequest, requestID string, res runtime.Result, durationMS int64, execErr error) error {
 	if s.deps.Audit == nil {
-		return
+		return nil
 	}
 	hash, n, preview := audit.SummarizeCode(req.Code)
 	ev := audit.Event{
@@ -136,6 +140,8 @@ func (s *Server) recordAudit(req ExecuteRequest, requestID string, res runtime.R
 		ExitCode:    res.ExitCode,
 		TimedOut:    res.TimedOut,
 		DurationMS:  durationMS,
+		AuthMethod:  authMethodFrom(ctx),
+		ClientCN:    clientCNFrom(ctx),
 	}
 	if execErr != nil {
 		ev.Error = execErr.Error()
@@ -145,7 +151,9 @@ func (s *Server) recordAudit(req ExecuteRequest, requestID string, res runtime.R
 	}
 	if err := s.deps.Audit.Record(ev); err != nil {
 		s.deps.Log.Error("audit record failed", "request_id", requestID, "err", err)
+		return err
 	}
+	return nil
 }
 
 func mapExecError(err error) (status int, code, msg string) {

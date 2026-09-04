@@ -136,8 +136,14 @@ Variables de entorno:
 | Variable | Default | Qué hace |
 | --- | --- | --- |
 | `PORT` / `WARDEN_ADDR` | unset → `127.0.0.1:8080` | `PORT` implica `0.0.0.0:$PORT` |
-| `WARDEN_API_KEY` | unset | Obligatoria en bind público |
+| `WARDEN_API_KEY` | unset | Una de: key, JWT o mTLS en bind público |
+| `WARDEN_JWT_JWKS` / `_ISSUER` / `_AUDIENCE` | unset / unset / `warden` | Bearer JWT RS256 |
+| `WARDEN_TLS_CERT` / `_KEY` / `_CLIENT_CA` | unset | HTTPS; CA de cliente = mTLS |
+| `WARDEN_AUTH_REQUIRE_ALL` | unset | `1` exige todos los métodos configurados |
 | `WARDEN_ALLOW_ANON` | unset | `1` override (solo red de confianza) |
+| `WARDEN_AUDIT_URL` / `_TOKEN` | unset | POST JSON de cada evento |
+| `WARDEN_AUDIT_DATABASE_URL` | unset | Postgres (`warden_audit`); fallback `DATABASE_URL` |
+| `WARDEN_AUDIT_STRICT` | unset | `1` → 500 si un sink falla |
 | `WARDEN_MAX_VMS` | `1` | VMs concurrentes; extra espera en cola |
 | `WARDEN_VM_QUEUE_WAIT` | `15s` | Timeout de la cola → 429 |
 | `WARDEN_ROOTFS_POOL` | `2` (firecracker) | Clones precalentados; `0` desactiva |
@@ -198,9 +204,10 @@ Decisiones de fase 2 que importan:
 - **seccomp del VMM ≠ seccomp del guest.** El jailer/Firecracker traen el filtro del VMM. `configs/seccomp.json` no se inyecta al proceso KVM.
 - **cgroups.** Sin jailer: attach best-effort al PID. Con jailer: `--cgroup-version 2` si `WARDEN_JAILER_CGROUP=1`.
 - **Copia del rootfs:** pool de N clones precalentados (`data/vms/pool/`). Un miss clona en el momento. Nunca se devuelve un disco sucio al pool. `cp --reflink=auto` con fallback a copy. El kernel se hardlinkea. El store de sesión vive en `data/snapshots/` (nunca dentro del workdir de la VM).
-- **Snapshots.** `PATCH /vm` pause → `PUT /snapshot/create` (Full). Restore: proceso fresco, solo logger, `PUT /snapshot/load` + `resume_vm`. El TAP se recrea con los **mismos** nombres/IPs (el `host_dev_name` va en el snap).
+- **Snapshots.** Primera vez: `Full`. Siguientes: `Diff` (solo páginas sucias, `track_dirty_pages`) y rebase sparse sobre `vm.mem`. Restore: proceso fresco, logger, `PUT /snapshot/load` + `resume_vm` + dirty tracking. El TAP se recrea con los **mismos** nombres/IPs.
 - **KVM anidado.** En este Cloud Agent `KVM_CREATE_VCPU` hace oops. En un `.metal`: `WARDEN_ITEST=1 go test ./internal/runtime -run TestFirecrackerRealVM`.
-- **Auth + cola.** Bind público sin `WARDEN_API_KEY` no arranca. `Gate` limita VMs vivas (default 1); el overflow espera `WARDEN_VM_QUEUE_WAIT` y si no hay hueco responde 429. El slot se libera en `Destroy`, también si Boot falla.
+- **Auth + cola.** Bind público exige API key, JWT (JWKS) o mTLS. `Gate` limita VMs vivas (default 1); overflow → 429. El slot se libera en `Destroy` y si Boot falla.
+- **Auditoría durable.** JSONL con fsync + línea slog (log drain) + opcional `WARDEN_AUDIT_URL` y Postgres (`WARDEN_AUDIT_DATABASE_URL` / `DATABASE_URL`). `WARDEN_AUDIT_STRICT=1` convierte un sink caído en HTTP 500.
 
 Jailer:
 
@@ -213,9 +220,9 @@ go run ./cmd/warden
 
 ## Lo que esto NO es (aún)
 
-- mTLS / OAuth (la API key es el MVP)
-- Diff snapshots
-- Auditoría durable (el JSONL se pierde en cada deploy)
+- Authorization Code / login interactivo (el JWT es machine-to-machine RS256)
+- Multi-tenant / quotas por cliente
+- Diff snapshots sin rebase (el restore siempre carga el mem ya fusionado)
 
 ## Licencia
 

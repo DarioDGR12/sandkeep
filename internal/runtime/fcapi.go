@@ -30,9 +30,10 @@ func newFCClient(sock string, timeout time.Duration) *fcClient {
 }
 
 type fcMachineConfig struct {
-	VCPUCount  int  `json:"vcpu_count"`
-	MemSizeMiB int  `json:"mem_size_mib"`
-	SMT        bool `json:"smt"`
+	VCPUCount       int  `json:"vcpu_count"`
+	MemSizeMiB      int  `json:"mem_size_mib"`
+	SMT             bool `json:"smt"`
+	TrackDirtyPages bool `json:"track_dirty_pages,omitempty"`
 }
 
 type fcBootSource struct {
@@ -85,9 +86,10 @@ type fcMemBackend struct {
 }
 
 type fcSnapshotLoad struct {
-	SnapshotPath string       `json:"snapshot_path"`
-	MemBackend   fcMemBackend `json:"mem_backend"`
-	ResumeVM     bool         `json:"resume_vm"`
+	SnapshotPath    string       `json:"snapshot_path"`
+	MemBackend      fcMemBackend `json:"mem_backend"`
+	ResumeVM        bool         `json:"resume_vm"`
+	TrackDirtyPages bool         `json:"track_dirty_pages"`
 }
 
 type fcVMState struct {
@@ -134,9 +136,12 @@ func (c *fcClient) pauseVM(ctx context.Context) error {
 	return c.patch(ctx, "/vm", fcVMState{State: "Paused"})
 }
 
-func (c *fcClient) createSnapshot(ctx context.Context, snapPath, memPath string) error {
+func (c *fcClient) createSnapshot(ctx context.Context, kind, snapPath, memPath string) error {
+	if kind == "" {
+		kind = "Full"
+	}
 	return c.put(ctx, "/snapshot/create", fcSnapshotCreate{
-		SnapshotType: "Full",
+		SnapshotType: kind,
 		SnapshotPath: snapPath,
 		MemFilePath:  memPath,
 	})
@@ -144,9 +149,10 @@ func (c *fcClient) createSnapshot(ctx context.Context, snapPath, memPath string)
 
 func (c *fcClient) loadSnapshot(ctx context.Context, snapPath, memPath string) error {
 	return c.put(ctx, "/snapshot/load", fcSnapshotLoad{
-		SnapshotPath: snapPath,
-		MemBackend:   fcMemBackend{BackendType: "File", BackendPath: memPath},
-		ResumeVM:     true,
+		SnapshotPath:    snapPath,
+		MemBackend:      fcMemBackend{BackendType: "File", BackendPath: memPath},
+		ResumeVM:        true,
+		TrackDirtyPages: true,
 	})
 }
 

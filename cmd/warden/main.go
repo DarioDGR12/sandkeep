@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -102,12 +104,48 @@ func run() error {
 
 	apiKey := strings.TrimSpace(os.Getenv("WARDEN_API_KEY"))
 	allowAnon := os.Getenv("WARDEN_ALLOW_ANON") == "1"
-	if err := api.CheckBind(listen, apiKey, allowAnon); err != nil {
+	tlsCfg, err := api.LoadTLS(api.TLSFiles{
+		CertFile:     os.Getenv("WARDEN_TLS_CERT"),
+		KeyFile:      os.Getenv("WARDEN_TLS_KEY"),
+		ClientCAFile: os.Getenv("WARDEN_TLS_CLIENT_CA"),
+	})
+	if err != nil {
 		return err
+	}
+	mtls := tlsCfg != nil && tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert
+	jwksURL := strings.TrimSpace(os.Getenv("WARDEN_JWT_JWKS"))
+	var jwt *api.JWTVerifier
+	if jwksURL != "" {
+		jwt = &api.JWTVerifier{
+			JWKSURL:  jwksURL,
+			Issuer:   os.Getenv("WARDEN_JWT_ISSUER"),
+			Audience: envOr("WARDEN_JWT_AUDIENCE", "warden"),
+		}
+	}
+	if err := api.CheckBindPolicy(listen, api.AuthPolicy{
+		APIKey:    apiKey,
+		AllowAnon: allowAnon,
+		JWKSURL:   jwksURL,
+		MTLS:      mtls,
+	}); err != nil {
+		return err
+	}
+
+	auditLog, dbCloser, err := buildAudit(log, auditPath)
+	if err != nil {
+		return err
+	}
+	if dbCloser != nil {
+		defer dbCloser.Close()
 	}
 
 	httpCfg := api.DefaultConfig(listen)
 	httpCfg.APIKey = apiKey
+	httpCfg.JWT = jwt
+	httpCfg.TLS = tlsCfg
+	httpCfg.MTLS = mtls
+	httpCfg.RequireAll = os.Getenv("WARDEN_AUTH_REQUIRE_ALL") == "1"
+	httpCfg.MTLSSuffices = !httpCfg.RequireAll
 	cgroupLimiter := resources.NoopLimiter{Log: log}
 	srv := api.NewServer(httpCfg, api.Dependencies{
 		Runtime:     rt,
@@ -115,7 +153,8 @@ func run() error {
 		Limits:      limits,
 		Seccomp:     seccomp,
 		Network:     netFilter,
-		Audit:       audit.NewJSONLLogger(auditPath),
+		Audit:       auditLog,
+		AuditStrict: os.Getenv("WARDEN_AUDIT_STRICT") == "1",
 		Snapshots:   snaps,
 		Log:         log,
 		BootTimeout: 20 * time.Second,
@@ -141,6 +180,9 @@ func run() error {
 		"memory_bytes", limits.MemoryBytes,
 		"snapshots", fmt.Sprintf("%T", snaps),
 		"auth", apiKey != "",
+		"jwt", jwt != nil,
+		"tls", tlsCfg != nil,
+		"mtls", mtls,
 		"max_vms", maxVMs,
 	)
 
@@ -177,6 +219,33 @@ func listenAddr() string {
 	}
 	// Local default is loopback so `go run` does not need an API key.
 	return "127.0.0.1:8080"
+}
+
+func buildAudit(log *slog.Logger, jsonlPath string) (audit.Logger, *sql.DB, error) {
+	sinks := []audit.Logger{
+		audit.NewJSONLLogger(jsonlPath),
+		audit.SlogSink{Log: log},
+	}
+	if u := strings.TrimSpace(os.Getenv("WARDEN_AUDIT_URL")); u != "" {
+		sinks = append(sinks, audit.HTTPSink{
+			URL:   u,
+			Token: os.Getenv("WARDEN_AUDIT_TOKEN"),
+		})
+	}
+	dsn := strings.TrimSpace(os.Getenv("WARDEN_AUDIT_DATABASE_URL"))
+	if dsn == "" {
+		dsn = strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	}
+	var db *sql.DB
+	if dsn != "" {
+		sink, opened, err := audit.OpenPostgres(dsn)
+		if err != nil {
+			return nil, nil, err
+		}
+		db = opened
+		sinks = append(sinks, sink)
+	}
+	return audit.Fanout{Sinks: sinks}, db, nil
 }
 
 func envOr(key, fallback string) string {

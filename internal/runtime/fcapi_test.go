@@ -92,7 +92,10 @@ func TestFCClientSnapshotAPI(t *testing.T) {
 	if err := c.pauseVM(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.createSnapshot(ctx, "/vm.snap", "/vm.mem"); err != nil {
+	if err := c.createSnapshot(ctx, "Full", "/vm.snap", "/vm.mem"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.createSnapshot(ctx, "Diff", "/vm.snap", "/vm.diff.mem"); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.loadSnapshot(ctx, "/vm.snap", "/vm.mem"); err != nil {
@@ -108,18 +111,18 @@ func TestFCClientSnapshotAPI(t *testing.T) {
 	if got["/snapshot/create"].method != http.MethodPut {
 		t.Fatalf("create method=%s", got["/snapshot/create"].method)
 	}
-	if got["/snapshot/create"].body["snapshot_type"] != "Full" {
-		t.Fatalf("create body=%v", got["/snapshot/create"].body)
+	if got["/snapshot/create"].body["snapshot_type"] != "Diff" {
+		t.Fatalf("last create must be Diff, body=%v", got["/snapshot/create"].body)
 	}
-	if got["/snapshot/create"].body["snapshot_path"] != "/vm.snap" || got["/snapshot/create"].body["mem_file_path"] != "/vm.mem" {
-		t.Fatalf("create paths=%v", got["/snapshot/create"].body)
+	if got["/snapshot/create"].body["mem_file_path"] != "/vm.diff.mem" {
+		t.Fatalf("diff mem path=%v", got["/snapshot/create"].body)
 	}
 	load := got["/snapshot/load"]
 	if load.method != http.MethodPut {
 		t.Fatalf("load method=%s", load.method)
 	}
-	if load.body["resume_vm"] != true {
-		t.Fatalf("load must resume: %v", load.body)
+	if load.body["resume_vm"] != true || load.body["track_dirty_pages"] != true {
+		t.Fatalf("load must resume with dirty-page tracking: %v", load.body)
 	}
 	backend, _ := load.body["mem_backend"].(map[string]any)
 	if backend["backend_type"] != "File" || backend["backend_path"] != "/vm.mem" {

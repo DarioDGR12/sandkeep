@@ -27,6 +27,8 @@ type Event struct {
 	TimedOut    bool      `json:"timed_out"`
 	DurationMS  int64     `json:"duration_ms"`
 	Error       string    `json:"error,omitempty"`
+	AuthMethod  string    `json:"auth_method,omitempty"`
+	ClientCN    string    `json:"client_cn,omitempty"`
 }
 
 // Logger persists audit events. Implementations must be safe for concurrent use.

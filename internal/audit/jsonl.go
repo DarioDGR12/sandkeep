@@ -8,11 +8,9 @@ import (
 	"time"
 )
 
-// JSONLLogger appends one JSON object per line. Concurrent Record calls are
-// serialized with a mutex so lines are never interleaved.
-//
-// On Render (and most PaaS hosts) the local disk is ephemeral. Treat this
-// file as a local buffer; a later phase should ship events to durable storage.
+// JSONLLogger appends one JSON object per line and fsyncs so a crash does
+// not lose the last event. On ephemeral PaaS disks this is still a local
+// buffer — pair it with Fanout (slog / HTTP / SQL) for durability.
 type JSONLLogger struct {
 	mu   sync.Mutex
 	path string
@@ -45,6 +43,9 @@ func (l *JSONLLogger) Record(event Event) error {
 
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		return fmt.Errorf("audit write: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("audit fsync: %w", err)
 	}
 	return nil
 }

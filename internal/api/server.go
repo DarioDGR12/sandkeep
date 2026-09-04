@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"log/slog"
 	"net"
@@ -22,6 +23,11 @@ import (
 type Config struct {
 	Addr            string
 	APIKey          string
+	JWT             *JWTVerifier
+	TLS             *tls.Config
+	MTLS            bool
+	MTLSSuffices    bool
+	RequireAll      bool
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration
@@ -48,6 +54,7 @@ type Dependencies struct {
 	Seccomp     resources.SeccompProfile
 	Network     network.Filter
 	Audit       audit.Logger
+	AuditStrict bool
 	Snapshots   snapshot.Store
 	Log         *slog.Logger
 	BootTimeout time.Duration
@@ -77,6 +84,7 @@ func NewServer(cfg Config, deps Dependencies) *Server {
 	s.http = &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           s.middleware(mux),
+		TLSConfig:         cfg.TLS,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
@@ -90,8 +98,16 @@ func (s *Server) Handler() http.Handler {
 	return s.http.Handler
 }
 
-// ListenAndServe binds cfg.Addr (use 0.0.0.0:$PORT on Render and similar).
+// ListenAndServe binds cfg.Addr. When TLS is configured it serves HTTPS
+// (and mTLS if ClientAuth is RequireAndVerifyClientCert).
 func (s *Server) ListenAndServe() error {
+	if s.cfg.TLS != nil {
+		ln, err := net.Listen("tcp", s.cfg.Addr)
+		if err != nil {
+			return err
+		}
+		return s.http.Serve(tls.NewListener(ln, s.cfg.TLS))
+	}
 	return s.http.ListenAndServe()
 }
 
@@ -119,9 +135,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}()
 
 		rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		if s.cfg.APIKey != "" && r.URL.Path != "/health" {
-			if !apiKeyEqual(tokenFromRequest(r), s.cfg.APIKey) {
-				s.recordAudit(ExecuteRequest{}, requestID, runtime.Result{}, 0, errUnauthorized)
+		if r.URL.Path != "/health" {
+			method, cn, ok := s.authorize(r)
+			if !ok {
+				_ = s.recordAudit(r.Context(), ExecuteRequest{}, requestID, runtime.Result{}, 0, errUnauthorized)
 				writeError(rw, requestID, http.StatusUnauthorized, CodeUnauthorized, "unauthorized")
 				s.deps.Log.Info("http",
 					"method", r.Method,
@@ -133,6 +150,8 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				)
 				return
 			}
+			r = r.WithContext(context.WithValue(r.Context(), ctxAuthMethod, method))
+			r = r.WithContext(context.WithValue(r.Context(), ctxClientCN, cn))
 		}
 		next.ServeHTTP(rw, r)
 		s.deps.Log.Info("http",
@@ -166,10 +185,28 @@ func remoteHost(r *http.Request) string {
 
 type ctxKey int
 
-const ctxRequestID ctxKey = 1
+const (
+	ctxRequestID  ctxKey = 1
+	ctxAuthMethod ctxKey = 2
+	ctxClientCN   ctxKey = 3
+)
 
 func requestIDFrom(ctx context.Context) string {
 	if v, ok := ctx.Value(ctxRequestID).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func authMethodFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxAuthMethod).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func clientCNFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxClientCN).(string); ok {
 		return v
 	}
 	return ""

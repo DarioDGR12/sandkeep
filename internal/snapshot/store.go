@@ -47,6 +47,8 @@ type Record struct {
 	UplinkHost   string    `json:"uplink_host,omitempty"`
 	UplinkNS     string    `json:"uplink_ns,omitempty"`
 	Table        string    `json:"table,omitempty"`
+	Generation   int       `json:"generation"`
+	LastKind     string    `json:"last_kind,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 

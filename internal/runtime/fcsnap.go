@@ -54,9 +54,24 @@ func (i *firecrackerInstance) saveSnapshot(ctx context.Context) error {
 	rec.GuestCID = i.cid
 	fillRecordNetwork(rec, i.tap)
 
+	kind := "Full"
+	if rec.Generation > 0 {
+		kind = "Diff"
+	}
 	snapPath, memPath := rec.SnapshotPath, rec.MemoryPath
+	diffHost := ""
+	if rec.Path != "" {
+		diffHost = filepath.Join(rec.Path, "vm.diff.mem")
+	}
 	if i.jailed {
-		snapPath, memPath = "/vm.snap", "/vm.mem"
+		snapPath = "/vm.snap"
+		if kind == "Diff" {
+			memPath = "/vm.diff.mem"
+		} else {
+			memPath = "/vm.mem"
+		}
+	} else if kind == "Diff" && diffHost != "" {
+		memPath = diffHost
 	}
 
 	snapCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -64,7 +79,7 @@ func (i *firecrackerInstance) saveSnapshot(ctx context.Context) error {
 	if err := i.client.pauseVM(snapCtx); err != nil {
 		return fmt.Errorf("pause vm: %w", err)
 	}
-	if err := i.client.createSnapshot(snapCtx, snapPath, memPath); err != nil {
+	if err := i.client.createSnapshot(snapCtx, kind, snapPath, memPath); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
 
@@ -72,15 +87,29 @@ func (i *firecrackerInstance) saveSnapshot(ctx context.Context) error {
 		if err := cloneFile(filepath.Join(i.workDir, "root", "vm.snap"), rec.SnapshotPath); err != nil {
 			return fmt.Errorf("export snap: %w", err)
 		}
-		if err := cloneFile(filepath.Join(i.workDir, "root", "vm.mem"), rec.MemoryPath); err != nil {
-			return fmt.Errorf("export mem: %w", err)
+		if kind == "Full" {
+			if err := cloneFile(filepath.Join(i.workDir, "root", "vm.mem"), rec.MemoryPath); err != nil {
+				return fmt.Errorf("export mem: %w", err)
+			}
+		} else if diffHost != "" {
+			if err := cloneFile(filepath.Join(i.workDir, "root", "vm.diff.mem"), diffHost); err != nil {
+				return fmt.Errorf("export diff: %w", err)
+			}
 		}
+	}
+	if kind == "Diff" && diffHost != "" {
+		if err := applySparseDiff(rec.MemoryPath, diffHost); err != nil {
+			return fmt.Errorf("rebase diff onto base mem: %w", err)
+		}
+		_ = os.Remove(diffHost)
 	}
 	if i.hostRootfs != "" && rec.RootfsPath != "" && i.hostRootfs != rec.RootfsPath {
 		if err := cloneFile(i.hostRootfs, rec.RootfsPath); err != nil {
 			return fmt.Errorf("export rootfs: %w", err)
 		}
 	}
+	rec.LastKind = kind
+	rec.Generation++
 	return i.store.Commit(ctx, rec)
 }
 
