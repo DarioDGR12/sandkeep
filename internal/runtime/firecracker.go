@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -99,6 +101,7 @@ func (f *Firecracker) Boot(ctx context.Context, spec Spec) (Instance, error) {
 		vsockUDS: filepath.Join(workDir, "v.sock"),
 		logFile:  filepath.Join(workDir, "firecracker.log"),
 		log:      f.log,
+		exited:   make(chan struct{}),
 	}
 
 	if err := f.launch(ctx, spec, inst); err != nil {
@@ -109,6 +112,9 @@ func (f *Firecracker) Boot(ctx context.Context, spec Spec) (Instance, error) {
 }
 
 func denyNetworkOrFail(p network.Policy) error {
+	if p.DefaultPolicy == "" {
+		p = network.Default()
+	}
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("network policy: %w", err)
 	}
@@ -154,6 +160,7 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 	}
 	inst.cmd = cmd
 	inst.stderr = stderr
+	go inst.reap()
 
 	if f.cfg.Cgroup != nil {
 		cleanup, err := f.cfg.Cgroup.Attach(inst.id, cmd.Process.Pid, spec.Limits)
@@ -174,17 +181,24 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 	if memMiB < 128 {
 		memMiB = 128
 	}
-	if err := inst.client.configure(ctx,
-		fcMachineConfig{VCPUCount: f.cfg.VCPUCount, MemSizeMiB: memMiB, SMT: false},
-		fcBootSource{KernelImagePath: f.cfg.Kernel, BootArgs: f.cfg.BootArgs},
-		fcDrive{DriveID: "rootfs", PathOnHost: rootCopy, IsRootDevice: true, IsReadOnly: false},
-		fcVsock{GuestCID: inst.cid, UDSPath: inst.vsockUDS},
-		&fcLogger{LogPath: inst.logFile, Level: "Info", ShowLevel: true},
-	); err != nil {
+	if err := inst.whileAlive(ctx, func() error {
+		return inst.client.configure(ctx,
+			fcMachineConfig{VCPUCount: f.cfg.VCPUCount, MemSizeMiB: memMiB, SMT: false},
+			fcBootSource{KernelImagePath: f.cfg.Kernel, BootArgs: f.cfg.BootArgs},
+			fcDrive{DriveID: "rootfs", PathOnHost: rootCopy, IsRootDevice: true, IsReadOnly: false},
+			fcVsock{GuestCID: inst.cid, UDSPath: inst.vsockUDS},
+			&fcLogger{LogPath: inst.logFile, Level: "Info", ShowLevel: true},
+		)
+	}); err != nil {
 		inst.kill()
 		return err
 	}
-	if err := inst.client.startInstance(ctx); err != nil {
+	startCtx, startCancel := context.WithTimeout(ctx, 8*time.Second)
+	err = inst.whileAlive(startCtx, func() error {
+		return inst.client.startInstance(startCtx)
+	})
+	startCancel()
+	if err != nil {
 		inst.kill()
 		return err
 	}
@@ -218,6 +232,9 @@ type firecrackerInstance struct {
 	cgroupCleanup func() error
 	log           *slog.Logger
 	dead          atomic.Bool
+	waitOnce      sync.Once
+	waitErr       error
+	exited        chan struct{}
 }
 
 func (i *firecrackerInstance) ID() string { return i.id }
@@ -270,20 +287,16 @@ func (i *firecrackerInstance) Destroy(ctx context.Context) error {
 			i.log.Debug("SendCtrlAltDel", "vm_id", i.id, "err", err)
 		}
 	}
-	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	done := make(chan error, 1)
 	if i.cmd != nil && i.cmd.Process != nil {
-		go func() { done <- i.cmd.Wait() }()
+		waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		select {
 		case <-waitCtx.Done():
 			i.kill()
-			<-done
-		case err := <-done:
-			if err != nil && i.log != nil {
-				i.log.Debug("firecracker exit", "vm_id", i.id, "err", err)
-			}
+			_ = i.wait()
+		case <-i.done():
+			_ = i.wait()
 		}
+		cancel()
 	}
 	if i.stderr != nil {
 		_ = i.stderr.Close()
@@ -299,12 +312,77 @@ func (i *firecrackerInstance) Destroy(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+func (i *firecrackerInstance) reap() {
+	if i.cmd == nil {
+		return
+	}
+	err := i.cmd.Wait()
+	i.waitOnce.Do(func() { i.waitErr = err })
+	if i.exited != nil {
+		close(i.exited)
+	}
+}
+
+func (i *firecrackerInstance) wait() error {
+	if i.exited != nil {
+		<-i.exited
+	}
+	return i.waitErr
+}
+
+func (i *firecrackerInstance) done() <-chan struct{} {
+	return i.exited
+}
+
+func (i *firecrackerInstance) whileAlive(ctx context.Context, fn func() error) error {
+	errCh := make(chan error, 1)
+	go func() { errCh <- fn() }()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return i.annotateDeath(err)
+		}
+		return nil
+	case <-i.done():
+		return i.annotateDeath(fmt.Errorf("firecracker exited: %v", i.wait()))
+	case <-ctx.Done():
+		return i.annotateDeath(ctx.Err())
+	}
+}
+
+func (i *firecrackerInstance) annotateDeath(err error) error {
+	if err == nil {
+		return nil
+	}
+	tail := tailFile(i.logFile, 2048)
+	stderr := tailFile(filepath.Join(i.workDir, "fc.stderr"), 1024)
+	if tail == "" && stderr == "" {
+		return err
+	}
+	msg := err.Error()
+	hungStart := strings.Contains(tail, "InstanceStart")
+	if hungStart || strings.Contains(tail, "kvm") || strings.Contains(stderr, "KVM") || strings.Contains(msg, "exited") {
+		return fmt.Errorf("%w: KVM/VMM failed during InstanceStart (nested virt often oopses on KVM_CREATE_VCPU)\nlog: %s\nstderr: %s", err, tail, stderr)
+	}
+	return fmt.Errorf("%w\nlog: %s\nstderr: %s", err, tail, stderr)
+}
+
+func tailFile(path string, n int) string {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	if len(data) > n {
+		data = data[len(data)-n:]
+	}
+	return strings.TrimSpace(string(data))
+}
+
 func (i *firecrackerInstance) kill() {
 	if i.cmd == nil || i.cmd.Process == nil {
 		return
 	}
 	_ = syscall.Kill(-i.cmd.Process.Pid, syscall.SIGKILL)
-	_, _ = i.cmd.Process.Wait()
 }
 
 func (i *firecrackerInstance) cleanupFiles() error {

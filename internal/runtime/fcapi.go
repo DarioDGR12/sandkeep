@@ -17,16 +17,16 @@ type fcClient struct {
 }
 
 func newFCClient(sock string, timeout time.Duration) *fcClient {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
+	// Timeouts live on the request context. A client-level timeout hid
+	// Firecracker dying mid-InstanceStart behind "awaiting headers".
+	_ = timeout
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", sock)
 		},
 	}
-	return &fcClient{http: &http.Client{Transport: transport, Timeout: timeout}}
+	return &fcClient{http: &http.Client{Transport: transport}}
 }
 
 type fcMachineConfig struct {

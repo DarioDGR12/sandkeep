@@ -181,6 +181,7 @@ Decisiones de fase 2 que importan:
 - **cgroups al PID de Firecracker**, no a un nombre compartido `pending-vm`. En contenedores sin cgroup delegado el attach es best-effort (`WARDEN_CGROUP_REQUIRED=1` para fail-closed).
 - **guest-agent es PID 1** (`init=/usr/local/bin/guest-agent`). Monta proc/sys/dev y escucha vsock :52.
 - **Una copia del rootfs por VM** para no compartir escrituras. Pesado; snapshots/reflink vienen después.
+- **KVM anidado.** Firecracker necesita crear vCPUs. En algunos hosts virtualizados (este Cloud Agent incluido) `KVM_CREATE_VCPU` provoca un oops del kernel; el runtime detecta que el VMM murió y lo reporta. En un `.metal` o una máquina con KVM no anidado, `WARDEN_ITEST=1 go test ./internal/runtime -run TestFirecrackerRealVM` es el smoke test.
 
 ## Lo que esto NO es (aún)
 
