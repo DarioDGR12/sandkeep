@@ -1,0 +1,8 @@
+{
+  "comment": "Host-side limits applied to the Firecracker/jailer process, not to the Warden API process. Values are defaults for phase 1; tune per workload later.",
+  "cpu_quota_us": 100000,
+  "cpu_period_us": 100000,
+  "memory_bytes": 268435456,
+  "pids_max": 64,
+  "disk_bytes": 1073741824
+}

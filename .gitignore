@@ -1,0 +1,20 @@
+# Binaries
+/warden
+/bin/
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+
+# Runtime / local state (ephemeral on cloud hosts anyway)
+/data/
+*.log
+audit.jsonl
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp

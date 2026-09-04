@@ -1,0 +1,5 @@
+{
+  "comment": "Fail-closed egress: deny every destination unless it appears in allowlist. Phase 1 ships with an empty allowlist — guest code has no outbound network.",
+  "default_policy": "deny",
+  "allowlist": []
+}
