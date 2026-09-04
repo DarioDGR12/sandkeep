@@ -10,6 +10,7 @@ import (
 	"github.com/DarioDGR12/sandkeep/internal/guestproto"
 	"github.com/DarioDGR12/sandkeep/internal/network"
 	"github.com/DarioDGR12/sandkeep/internal/resources"
+	"github.com/DarioDGR12/sandkeep/internal/snapshot"
 )
 
 // ErrMissingAssets is returned when Firecracker cannot boot because the
@@ -32,8 +33,10 @@ type Config struct {
 	JailerSudo   bool          `json:"jailer_sudo"`
 	JailerCgroup bool          `json:"jailer_cgroup"`
 	NewPIDNS     bool          `json:"new_pid_ns"`
+	SnapshotDir  string        `json:"snapshot_dir"`
 	Cgroup       resources.CgroupAttacher
 	Tap          network.TapFactory
+	Snapshots    snapshot.Store
 }
 
 const defaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent"
@@ -49,6 +52,7 @@ func DefaultConfig() Config {
 		AgentPort:   guestproto.DefaultPort,
 		BootTimeout: 20 * time.Second,
 		VCPUCount:   1,
+		SnapshotDir: "data/snapshots",
 	}
 }
 
@@ -120,6 +124,9 @@ func overlayEnv(cfg *Config) {
 	}
 	if os.Getenv("WARDEN_JAILER_NEWPID") == "1" {
 		cfg.NewPIDNS = true
+	}
+	if v := os.Getenv("WARDEN_SNAPSHOT_DIR"); v != "" {
+		cfg.SnapshotDir = v
 	}
 }
 

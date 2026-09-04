@@ -59,7 +59,7 @@ type Server struct {
 	http *http.Server
 }
 
-// NewServer wires routes and middleware. Snapshots may be nil (phase 1).
+// NewServer wires routes and middleware. Snapshots may be nil (treated as Unsupported).
 func NewServer(cfg Config, deps Dependencies) *Server {
 	if deps.Log == nil {
 		deps.Log = slog.Default()

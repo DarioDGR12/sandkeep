@@ -1,9 +1,9 @@
 // Package network enforces guest egress: the sandbox may only open outbound
 // connections to an explicit allowlist. The default policy is deny.
 //
-// Enforcement in phase 2 will sit on the host TAP/iptables path in front of
-// the microVM. Phase 1 loads, validates, and consults the policy so the
-// execute pipeline already has a single place to ask "is this dial allowed?".
+// Enforcement sits on the host veth (nft fail-closed) in front of the
+// microVM TAP, which lives in a dedicated netns. The in-process Allows()
+// check is the same policy the TAP factory resolves into nft rules.
 package network
 
 import (

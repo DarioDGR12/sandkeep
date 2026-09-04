@@ -75,7 +75,7 @@ func prepareJail(layout jailLayout, kernel, rootfs string) error {
 	return f.Close()
 }
 
-func jailerCommand(cfg Config, layout jailLayout) (*exec.Cmd, error) {
+func jailerCommand(cfg Config, layout jailLayout, netnsPath string) (*exec.Cmd, error) {
 	if cfg.Jailer == "" {
 		return nil, fmt.Errorf("jailer binary is empty")
 	}
@@ -95,6 +95,9 @@ func jailerCommand(cfg Config, layout jailLayout) (*exec.Cmd, error) {
 	}
 	if cfg.NewPIDNS {
 		args = append(args, "--new-pid-ns")
+	}
+	if netnsPath != "" {
+		args = append(args, "--netns", netnsPath)
 	}
 	args = append(args, "--", "--api-sock", "/api.sock")
 

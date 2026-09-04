@@ -60,6 +60,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	snaps := snapshot.Store(snapshot.Unsupported{})
 	if backend == "firecracker" {
 		fcCfg, err := runtime.LoadConfig(filepath.Join(cfgDir, "firecracker.json"))
 		if err != nil {
@@ -69,7 +70,15 @@ func run() error {
 			Log:     log,
 			Require: os.Getenv("WARDEN_CGROUP_REQUIRED") == "1",
 		}
-		fcCfg.Tap = network.NewTAP(log)
+		tap := network.NewTAP(log)
+		if os.Getenv("WARDEN_NET_SUDO") == "1" || os.Getenv("WARDEN_JAILER_SUDO") == "1" {
+			tap.Sudo = true
+		}
+		fcCfg.Tap = tap
+		if fcCfg.SnapshotDir != "" {
+			snaps = snapshot.NewDirStore(fcCfg.SnapshotDir)
+			fcCfg.Snapshots = snaps
+		}
 		rt = runtime.NewFirecrackerWithConfig(fcCfg)
 	}
 
@@ -81,7 +90,7 @@ func run() error {
 		Seccomp:     seccomp,
 		Network:     netFilter,
 		Audit:       audit.NewJSONLLogger(auditPath),
-		Snapshots:   snapshot.Unsupported{},
+		Snapshots:   snaps,
 		Log:         log,
 		BootTimeout: 20 * time.Second,
 	})
@@ -103,6 +112,7 @@ func run() error {
 		"audit_log", auditPath,
 		"egress_allowlist", len(netPolicy.Allowlist),
 		"memory_bytes", limits.MemoryBytes,
+		"snapshots", fmt.Sprintf("%T", snaps),
 	)
 
 	errCh := make(chan error, 1)

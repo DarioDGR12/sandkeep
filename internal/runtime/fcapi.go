@@ -73,12 +73,33 @@ type fcError struct {
 	FaultMessage string `json:"fault_message"`
 }
 
-func (c *fcClient) put(ctx context.Context, path string, body any) error {
+type fcSnapshotCreate struct {
+	SnapshotType string `json:"snapshot_type"`
+	SnapshotPath string `json:"snapshot_path"`
+	MemFilePath  string `json:"mem_file_path"`
+}
+
+type fcMemBackend struct {
+	BackendType string `json:"backend_type"`
+	BackendPath string `json:"backend_path"`
+}
+
+type fcSnapshotLoad struct {
+	SnapshotPath string       `json:"snapshot_path"`
+	MemBackend   fcMemBackend `json:"mem_backend"`
+	ResumeVM     bool         `json:"resume_vm"`
+}
+
+type fcVMState struct {
+	State string `json:"state"`
+}
+
+func (c *fcClient) do(ctx context.Context, method, path string, body any) error {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("firecracker marshal %s: %w", path, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://localhost"+path, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -86,7 +107,7 @@ func (c *fcClient) put(ctx context.Context, path string, body any) error {
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("firecracker PUT %s: %w", path, err)
+		return fmt.Errorf("firecracker %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
@@ -96,9 +117,37 @@ func (c *fcClient) put(ctx context.Context, path string, body any) error {
 		if fe.FaultMessage == "" {
 			fe.FaultMessage = string(payload)
 		}
-		return fmt.Errorf("firecracker PUT %s: %s (%d)", path, fe.FaultMessage, resp.StatusCode)
+		return fmt.Errorf("firecracker %s %s: %s (%d)", method, path, fe.FaultMessage, resp.StatusCode)
 	}
 	return nil
+}
+
+func (c *fcClient) put(ctx context.Context, path string, body any) error {
+	return c.do(ctx, http.MethodPut, path, body)
+}
+
+func (c *fcClient) patch(ctx context.Context, path string, body any) error {
+	return c.do(ctx, http.MethodPatch, path, body)
+}
+
+func (c *fcClient) pauseVM(ctx context.Context) error {
+	return c.patch(ctx, "/vm", fcVMState{State: "Paused"})
+}
+
+func (c *fcClient) createSnapshot(ctx context.Context, snapPath, memPath string) error {
+	return c.put(ctx, "/snapshot/create", fcSnapshotCreate{
+		SnapshotType: "Full",
+		SnapshotPath: snapPath,
+		MemFilePath:  memPath,
+	})
+}
+
+func (c *fcClient) loadSnapshot(ctx context.Context, snapPath, memPath string) error {
+	return c.put(ctx, "/snapshot/load", fcSnapshotLoad{
+		SnapshotPath: snapPath,
+		MemBackend:   fcMemBackend{BackendType: "File", BackendPath: memPath},
+		ResumeVM:     true,
+	})
 }
 
 func (c *fcClient) configure(ctx context.Context, machine fcMachineConfig, boot fcBootSource, drive fcDrive, vsock fcVsock, logger *fcLogger, nic *fcNetIface) error {

@@ -64,6 +64,69 @@ func TestFCClientConfigureAndStart(t *testing.T) {
 	}
 }
 
+func TestFCClientSnapshotAPI(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "fc.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	type hit struct {
+		method string
+		body   map[string]any
+	}
+	got := map[string]hit{}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got[r.URL.Path] = hit{method: r.Method, body: body}
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c := newFCClient(sock, 2*time.Second)
+	ctx := context.Background()
+	if err := c.pauseVM(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.createSnapshot(ctx, "/vm.snap", "/vm.mem"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.loadSnapshot(ctx, "/vm.snap", "/vm.mem"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got["/vm"].method != http.MethodPatch {
+		t.Fatalf("pause method=%s", got["/vm"].method)
+	}
+	if got["/vm"].body["state"] != "Paused" {
+		t.Fatalf("pause body=%v", got["/vm"].body)
+	}
+	if got["/snapshot/create"].method != http.MethodPut {
+		t.Fatalf("create method=%s", got["/snapshot/create"].method)
+	}
+	if got["/snapshot/create"].body["snapshot_type"] != "Full" {
+		t.Fatalf("create body=%v", got["/snapshot/create"].body)
+	}
+	if got["/snapshot/create"].body["snapshot_path"] != "/vm.snap" || got["/snapshot/create"].body["mem_file_path"] != "/vm.mem" {
+		t.Fatalf("create paths=%v", got["/snapshot/create"].body)
+	}
+	load := got["/snapshot/load"]
+	if load.method != http.MethodPut {
+		t.Fatalf("load method=%s", load.method)
+	}
+	if load.body["resume_vm"] != true {
+		t.Fatalf("load must resume: %v", load.body)
+	}
+	backend, _ := load.body["mem_backend"].(map[string]any)
+	if backend["backend_type"] != "File" || backend["backend_path"] != "/vm.mem" {
+		t.Fatalf("mem backend=%v", backend)
+	}
+}
+
 func TestFCClientSurfaceFault(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "fc.sock")

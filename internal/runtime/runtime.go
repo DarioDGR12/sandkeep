@@ -15,7 +15,7 @@ import (
 	"github.com/DarioDGR12/sandkeep/internal/resources"
 )
 
-// ErrNotImplemented is kept for features that still fail closed (jailer, TAP).
+// ErrNotImplemented is kept for leftover fail-closed hooks.
 var ErrNotImplemented = errors.New("firecracker feature is not implemented yet")
 
 // Supported guest language runtimes for phase 1.
@@ -55,8 +55,8 @@ type Instance interface {
 	Destroy(ctx context.Context) error
 }
 
-// Runtime boots disposable instances. Phase 1 creates a new instance per
-// request and never reuses it.
+// Runtime boots disposable instances. A session_id plus a snapshot.Store
+// can restore a previous microVM; otherwise each request gets a new VM.
 type Runtime interface {
 	Boot(ctx context.Context, spec Spec) (Instance, error)
 	Name() string

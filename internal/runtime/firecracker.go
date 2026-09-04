@@ -16,12 +16,14 @@ import (
 
 	"github.com/DarioDGR12/sandkeep/internal/guestproto"
 	"github.com/DarioDGR12/sandkeep/internal/network"
+	"github.com/DarioDGR12/sandkeep/internal/snapshot"
 )
 
 // Firecracker boots a disposable microVM per request and talks to a guest
 // agent over vsock. There is no virtio-net device when the egress allowlist
-// is empty — that is the phase-2 enforcement of deny-all. A non-empty
-// allowlist fails closed until TAP/iptables lands.
+// is empty. A non-empty allowlist creates a TAP inside a dedicated netns
+// (jailer --netns / ip netns exec) so the TAP is never in the host netns.
+// session_id + a snapshot.Store restores a previous VM instead of cold boot.
 type Firecracker struct {
 	cfg  Config
 	log  *slog.Logger
@@ -57,6 +59,12 @@ func NewFirecrackerWithConfig(cfg Config) *Firecracker {
 	if cfg.Jailer != "" {
 		cfg.Jailer = absPath(cfg.Jailer)
 	}
+	if cfg.SnapshotDir != "" {
+		cfg.SnapshotDir = absPath(cfg.SnapshotDir)
+	}
+	if cfg.Snapshots == nil && cfg.SnapshotDir != "" {
+		cfg.Snapshots = snapshot.NewDirStore(cfg.SnapshotDir)
+	}
 	f := &Firecracker{cfg: cfg, log: slog.Default()}
 	f.cids.Store(2) // next CID is 3 (0-2 are reserved)
 	return f
@@ -83,10 +91,34 @@ func (f *Firecracker) Boot(ctx context.Context, spec Spec) (Instance, error) {
 		return nil, err
 	}
 
+	if spec.SessionID != "" && f.cfg.Snapshots != nil {
+		rec, err := f.cfg.Snapshots.Restore(ctx, spec.SessionID)
+		switch {
+		case err == nil && networkMatches(rec, spec.Network):
+			inst, rerr := f.bootOne(ctx, spec, rec)
+			if rerr == nil {
+				return inst, nil
+			}
+			f.log.Warn("snapshot restore failed; cold boot", "session_id", spec.SessionID, "err", rerr)
+			_ = f.cfg.Snapshots.Delete(ctx, spec.SessionID)
+		case err == nil && !networkMatches(rec, spec.Network):
+			f.log.Info("snapshot network mismatch; cold boot", "session_id", spec.SessionID)
+			_ = f.cfg.Snapshots.Delete(ctx, spec.SessionID)
+		case err != nil && !errors.Is(err, snapshot.ErrNotFound) && !errors.Is(err, snapshot.ErrNotImplemented):
+			return nil, err
+		}
+	}
+	return f.bootOne(ctx, spec, nil)
+}
+
+func (f *Firecracker) bootOne(ctx context.Context, spec Spec, rec *snapshot.Record) (Instance, error) {
 	id := fmt.Sprintf("fc-%d", f.seq.Add(1))
 	cid := f.cids.Add(1)
 	if cid < 3 {
 		cid = f.cids.Add(3)
+	}
+	if rec != nil && rec.GuestCID >= 3 {
+		cid = rec.GuestCID
 	}
 	workDir := filepath.Join(f.cfg.WorkDir, id)
 	if f.cfg.Jailer == "" {
@@ -96,19 +128,36 @@ func (f *Firecracker) Boot(ctx context.Context, spec Spec) (Instance, error) {
 	}
 
 	inst := &firecrackerInstance{
-		id:       id,
-		language: spec.Language,
-		cid:      cid,
-		port:     f.cfg.AgentPort,
-		workDir:  workDir,
-		apiSock:  filepath.Join(workDir, "api.sock"),
-		vsockUDS: filepath.Join(workDir, "v.sock"),
-		logFile:  filepath.Join(workDir, "firecracker.log"),
-		log:      f.log,
-		exited:   make(chan struct{}),
+		id:        id,
+		language:  spec.Language,
+		sessionID: spec.SessionID,
+		store:     f.cfg.Snapshots,
+		cid:       cid,
+		port:      f.cfg.AgentPort,
+		workDir:   workDir,
+		apiSock:   filepath.Join(workDir, "api.sock"),
+		vsockUDS:  filepath.Join(workDir, "v.sock"),
+		logFile:   filepath.Join(workDir, "firecracker.log"),
+		log:       f.log,
+		exited:    make(chan struct{}),
+	}
+	if rec == nil && spec.SessionID != "" && f.cfg.Snapshots != nil {
+		prepared, err := f.cfg.Snapshots.Prepare(ctx, spec.SessionID, id)
+		if err != nil && !errors.Is(err, snapshot.ErrNotImplemented) {
+			return nil, err
+		}
+		inst.snapRec = prepared
+	} else {
+		inst.snapRec = rec
 	}
 
-	if err := f.launch(ctx, spec, inst); err != nil {
+	var err error
+	if rec != nil {
+		err = f.launchRestore(ctx, spec, inst, rec)
+	} else {
+		err = f.launch(ctx, spec, inst)
+	}
+	if err != nil {
 		if inst.tap != nil && inst.tapTeardown != nil {
 			_ = inst.tapTeardown(inst.tap)
 		}
@@ -147,7 +196,7 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 	var nic *fcNetIface
 	bootArgs := f.cfg.BootArgs
 	if len(spec.Network.Allowlist) > 0 {
-		link, err := f.cfg.Tap.Setup(inst.id, spec.Network)
+		link, err := f.cfg.Tap.Setup(tapID(inst.id, spec.SessionID), spec.Network)
 		if err != nil {
 			return fmt.Errorf("tap: %w", err)
 		}
@@ -234,6 +283,11 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 type firecrackerInstance struct {
 	id            string
 	language      string
+	sessionID     string
+	store         snapshot.Store
+	snapRec       *snapshot.Record
+	jailed        bool
+	hostRootfs    string
 	cid           uint32
 	port          uint32
 	workDir       string
@@ -284,13 +338,15 @@ func (i *firecrackerInstance) Execute(ctx context.Context, req ExecRequest) (Res
 		}
 		return Result{}, err
 	}
-	return Result{
+	res := Result{
 		Stdout:   resp.Stdout,
 		Stderr:   resp.Stderr,
 		ExitCode: resp.ExitCode,
 		VMID:     i.id,
 		TimedOut: resp.TimedOut,
-	}, nil
+	}
+	i.maybeSnapshot()
+	return res, nil
 }
 
 func (i *firecrackerInstance) Destroy(ctx context.Context) error {
@@ -407,6 +463,13 @@ func (i *firecrackerInstance) kill() {
 }
 
 func (i *firecrackerInstance) cleanupFiles() error {
+	// Session vsock lives outside workDir so restore can reuse the path.
+	// A stale UDS blocks the next PUT /snapshot/load.
+	if i.snapRec != nil && i.snapRec.Path != "" && i.vsockUDS != "" {
+		if strings.HasPrefix(i.vsockUDS, i.snapRec.Path+string(os.PathSeparator)) {
+			_ = os.Remove(i.vsockUDS)
+		}
+	}
 	return os.RemoveAll(i.workDir)
 }
 
@@ -419,20 +482,26 @@ type vmPaths struct {
 }
 
 func (f *Firecracker) preparePaths(inst *firecrackerInstance) (vmPaths, error) {
+	return f.preparePathsFrom(inst, f.cfg.Rootfs)
+}
+
+func (f *Firecracker) preparePathsFrom(inst *firecrackerInstance, rootfsSrc string) (vmPaths, error) {
 	if f.cfg.Jailer != "" {
 		layout, err := newJailLayout(f.cfg.WorkDir, f.cfg.Binary, inst.id)
 		if err != nil {
 			return vmPaths{}, err
 		}
-		if err := prepareJail(layout, f.cfg.Kernel, f.cfg.Rootfs); err != nil {
+		if err := prepareJail(layout, f.cfg.Kernel, rootfsSrc); err != nil {
 			return vmPaths{}, err
 		}
+		inst.jailed = true
 		inst.workDir = layout.JailDir
 		inst.apiSock = filepath.Join(layout.Root, "api.sock")
 		inst.vsockUDS = filepath.Join(layout.Root, "v.sock")
 		inst.logFile = filepath.Join(layout.Root, "firecracker.log")
+		inst.hostRootfs = filepath.Join(layout.Root, "rootfs.ext4")
 		return vmPaths{
-			hostRootfs:  filepath.Join(layout.Root, "rootfs.ext4"),
+			hostRootfs:  inst.hostRootfs,
 			guestKernel: "/vmlinux",
 			guestRootfs: "/rootfs.ext4",
 			guestVsock:  "/v.sock",
@@ -441,7 +510,14 @@ func (f *Firecracker) preparePaths(inst *firecrackerInstance) (vmPaths, error) {
 	}
 
 	rootCopy := filepath.Join(inst.workDir, "rootfs.ext4")
-	if err := cloneFile(f.cfg.Rootfs, rootCopy); err != nil {
+	if inst.snapRec != nil && inst.snapRec.RootfsPath != "" {
+		if err := os.MkdirAll(inst.snapRec.Path, 0o750); err != nil {
+			return vmPaths{}, err
+		}
+		rootCopy = inst.snapRec.RootfsPath
+		inst.vsockUDS = filepath.Join(inst.snapRec.Path, "v.sock")
+	}
+	if err := cloneFile(rootfsSrc, rootCopy); err != nil {
 		return vmPaths{}, fmt.Errorf("clone rootfs: %w", err)
 	}
 	logF, err := os.OpenFile(inst.logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
@@ -449,6 +525,7 @@ func (f *Firecracker) preparePaths(inst *firecrackerInstance) (vmPaths, error) {
 		return vmPaths{}, fmt.Errorf("firecracker log: %w", err)
 	}
 	_ = logF.Close()
+	inst.hostRootfs = rootCopy
 	return vmPaths{
 		hostRootfs:  rootCopy,
 		guestKernel: f.cfg.Kernel,
@@ -461,12 +538,25 @@ func (f *Firecracker) preparePaths(inst *firecrackerInstance) (vmPaths, error) {
 func (f *Firecracker) spawnCmd(inst *firecrackerInstance, _ vmPaths) (*exec.Cmd, error) {
 	// Do not use CommandContext: cancelling the boot ctx must not SIGKILL
 	// the VM while Execute is still running. Destroy owns the lifecycle.
+	netnsPath := ""
+	netnsName := ""
+	if inst.tap != nil {
+		netnsPath = inst.tap.NetNSPath
+		netnsName = inst.tap.NetNS
+	}
 	if f.cfg.Jailer != "" {
 		layout, err := newJailLayout(f.cfg.WorkDir, f.cfg.Binary, inst.id)
 		if err != nil {
 			return nil, err
 		}
-		return jailerCommand(f.cfg, layout)
+		return jailerCommand(f.cfg, layout, netnsPath)
+	}
+	if netnsName != "" {
+		ip := network.IPCommand()
+		cmd := exec.Command(ip, "netns", "exec", netnsName, f.cfg.Binary, "--api-sock", inst.apiSock)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Dir = inst.workDir
+		return cmd, nil
 	}
 	cmd := exec.Command(f.cfg.Binary, "--api-sock", inst.apiSock)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

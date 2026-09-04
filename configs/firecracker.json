@@ -4,6 +4,7 @@
   "kernel": "assets/vmlinux",
   "rootfs": "assets/rootfs.ext4",
   "work_dir": "data/vms",
+  "snapshot_dir": "data/snapshots",
   "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent",
   "agent_port": 52,
   "vcpu_count": 1,

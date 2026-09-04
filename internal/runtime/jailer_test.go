@@ -58,15 +58,28 @@ func TestJailerCommand(t *testing.T) {
 		JailerGID:  123,
 		JailerSudo: true,
 		NewPIDNS:   true,
-	}, layout)
+	}, layout, "/var/run/netns/warden-abc-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	line := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"sudo", "-n", "/usr/bin/jailer", "--id abc-1", "--uid 123", "--new-pid-ns", "--api-sock /api.sock"} {
+	for _, want := range []string{"sudo", "-n", "/usr/bin/jailer", "--id abc-1", "--uid 123", "--new-pid-ns", "--netns /var/run/netns/warden-abc-1", "--api-sock /api.sock"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("missing %q in %s", want, line)
 		}
+	}
+
+	plain, err := jailerCommand(Config{
+		Jailer:    "/usr/bin/jailer",
+		Binary:    "/usr/bin/firecracker",
+		JailerUID: 123,
+		JailerGID: 123,
+	}, layout, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(plain.Args, " "), "--netns") {
+		t.Fatalf("empty netns must not pass --netns: %s", strings.Join(plain.Args, " "))
 	}
 }
 
