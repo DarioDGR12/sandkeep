@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -29,11 +31,19 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 			writeError(w, requestID, http.StatusRequestEntityTooLarge, CodeBodyTooLarge, "request body too large")
 			return
 		}
+		s.recordAudit(req, requestID, runtime.Result{}, 0, err)
+		writeError(w, requestID, http.StatusBadRequest, CodeInvalidJSON, "invalid JSON body")
+		return
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		trail := fmt.Errorf("trailing data after JSON object")
+		s.recordAudit(req, requestID, runtime.Result{}, 0, trail)
 		writeError(w, requestID, http.StatusBadRequest, CodeInvalidJSON, "invalid JSON body")
 		return
 	}
 
 	if err := validateExecute(&req); err != nil {
+		s.recordAudit(req, requestID, runtime.Result{}, 0, err)
 		writeError(w, requestID, http.StatusBadRequest, CodeInvalidRequest, err.Error())
 		return
 	}

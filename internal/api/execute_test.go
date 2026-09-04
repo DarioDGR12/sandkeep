@@ -101,6 +101,7 @@ func TestExecuteValidation(t *testing.T) {
 		{"timeout high", `{"code":"x","runtime":"python","timeout":9999}`, http.StatusBadRequest, api.CodeInvalidRequest},
 		{"bad json", `{`, http.StatusBadRequest, api.CodeInvalidJSON},
 		{"unknown field", `{"code":"x","runtime":"python","nope":1}`, http.StatusBadRequest, api.CodeInvalidJSON},
+		{"trailing junk", `{"code":"x","runtime":"python"}{"x":1}`, http.StatusBadRequest, api.CodeInvalidJSON},
 		{"bad session", `{"code":"x","runtime":"python","session_id":"../etc"}`, http.StatusBadRequest, api.CodeInvalidRequest},
 	}
 	for _, tc := range cases {
@@ -119,6 +120,24 @@ func TestExecuteValidation(t *testing.T) {
 				t.Fatalf("code=%q want=%q", errBody.Code, tc.code)
 			}
 		})
+	}
+}
+
+func TestExecuteRejectsAreAudited(t *testing.T) {
+	mem := &audit.MemoryLogger{}
+	h := testServer(t, nil, mem)
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"","runtime":"python","session_id":"probe"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	events := mem.Events()
+	if len(events) != 1 {
+		t.Fatalf("audit events=%d", len(events))
+	}
+	if events[0].SessionID != "probe" || events[0].Error == "" {
+		t.Fatalf("event=%+v", events[0])
 	}
 }
 
