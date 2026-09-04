@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -55,6 +54,9 @@ func NewFirecrackerWithConfig(cfg Config) *Firecracker {
 	cfg.Kernel = absPath(cfg.Kernel)
 	cfg.Rootfs = absPath(cfg.Rootfs)
 	cfg.WorkDir = absPath(cfg.WorkDir)
+	if cfg.Jailer != "" {
+		cfg.Jailer = absPath(cfg.Jailer)
+	}
 	f := &Firecracker{cfg: cfg, log: slog.Default()}
 	f.cids.Store(2) // next CID is 3 (0-2 are reserved)
 	return f
@@ -77,7 +79,7 @@ func (f *Firecracker) Boot(ctx context.Context, spec Spec) (Instance, error) {
 	if err := f.cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if err := denyNetworkOrFail(spec.Network); err != nil {
+	if err := denyNetworkOrFail(spec.Network, f.cfg.Tap); err != nil {
 		return nil, err
 	}
 
@@ -87,8 +89,10 @@ func (f *Firecracker) Boot(ctx context.Context, spec Spec) (Instance, error) {
 		cid = f.cids.Add(3)
 	}
 	workDir := filepath.Join(f.cfg.WorkDir, id)
-	if err := os.MkdirAll(workDir, 0o750); err != nil {
-		return nil, fmt.Errorf("vm workdir: %w", err)
+	if f.cfg.Jailer == "" {
+		if err := os.MkdirAll(workDir, 0o750); err != nil {
+			return nil, fmt.Errorf("vm workdir: %w", err)
+		}
 	}
 
 	inst := &firecrackerInstance{
@@ -105,31 +109,34 @@ func (f *Firecracker) Boot(ctx context.Context, spec Spec) (Instance, error) {
 	}
 
 	if err := f.launch(ctx, spec, inst); err != nil {
+		if inst.tap != nil && inst.tapTeardown != nil {
+			_ = inst.tapTeardown(inst.tap)
+		}
 		_ = inst.cleanupFiles()
 		return nil, err
 	}
 	return inst, nil
 }
 
-func denyNetworkOrFail(p network.Policy) error {
+func denyNetworkOrFail(p network.Policy, tap network.TapFactory) error {
 	if p.DefaultPolicy == "" {
 		p = network.Default()
 	}
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("network policy: %w", err)
 	}
-	if len(p.Allowlist) > 0 {
-		return fmt.Errorf("egress allowlist is not empty but TAP networking is not implemented; refusing to boot a VM that would silently have no network")
+	if len(p.Allowlist) > 0 && tap == nil {
+		return fmt.Errorf("egress allowlist is not empty but no TAP factory is configured; refusing to boot a VM that would silently have no network")
 	}
 	return nil
 }
 
 func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerInstance) error {
-	rootCopy := filepath.Join(inst.workDir, "rootfs.ext4")
-	if err := cloneFile(f.cfg.Rootfs, rootCopy); err != nil {
-		return fmt.Errorf("clone rootfs: %w", err)
+	paths, err := f.preparePaths(inst)
+	if err != nil {
+		return err
 	}
-	st, err := os.Stat(rootCopy)
+	st, err := os.Stat(paths.hostRootfs)
 	if err != nil {
 		return err
 	}
@@ -137,17 +144,23 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 		return fmt.Errorf("rootfs size %d exceeds disk limit %d", st.Size(), spec.Limits.DiskBytes)
 	}
 
-	logF, err := os.OpenFile(inst.logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
-	if err != nil {
-		return fmt.Errorf("firecracker log: %w", err)
+	var nic *fcNetIface
+	bootArgs := f.cfg.BootArgs
+	if len(spec.Network.Allowlist) > 0 {
+		link, err := f.cfg.Tap.Setup(inst.id, spec.Network)
+		if err != nil {
+			return fmt.Errorf("tap: %w", err)
+		}
+		inst.tap = link
+		inst.tapTeardown = f.cfg.Tap.Teardown
+		nic = &fcNetIface{IfaceID: "eth0", GuestMAC: link.GuestMAC, HostDevName: link.Name}
+		bootArgs = bootArgs + fmt.Sprintf(" ip=%s::%s:255.255.255.252:warden:eth0:off", link.GuestIP, link.HostIP)
 	}
-	_ = logF.Close()
 
-	// Do not use CommandContext: cancelling the boot ctx must not SIGKILL
-	// the VM while Execute is still running. Destroy owns the lifecycle.
-	cmd := exec.Command(f.cfg.Binary, "--api-sock", inst.apiSock)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Dir = inst.workDir
+	cmd, err := f.spawnCmd(inst, paths)
+	if err != nil {
+		return err
+	}
 	stderr, err := os.OpenFile(filepath.Join(inst.workDir, "fc.stderr"), os.O_CREATE|os.O_WRONLY, 0o640)
 	if err != nil {
 		return err
@@ -162,7 +175,7 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 	inst.stderr = stderr
 	go inst.reap()
 
-	if f.cfg.Cgroup != nil {
+	if f.cfg.Cgroup != nil && f.cfg.Jailer == "" {
 		cleanup, err := f.cfg.Cgroup.Attach(inst.id, cmd.Process.Pid, spec.Limits)
 		if err != nil {
 			inst.kill()
@@ -184,10 +197,11 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 	if err := inst.whileAlive(ctx, func() error {
 		return inst.client.configure(ctx,
 			fcMachineConfig{VCPUCount: f.cfg.VCPUCount, MemSizeMiB: memMiB, SMT: false},
-			fcBootSource{KernelImagePath: f.cfg.Kernel, BootArgs: f.cfg.BootArgs},
-			fcDrive{DriveID: "rootfs", PathOnHost: rootCopy, IsRootDevice: true, IsReadOnly: false},
-			fcVsock{GuestCID: inst.cid, UDSPath: inst.vsockUDS},
-			&fcLogger{LogPath: inst.logFile, Level: "Info", ShowLevel: true},
+			fcBootSource{KernelImagePath: paths.guestKernel, BootArgs: bootArgs},
+			fcDrive{DriveID: "rootfs", PathOnHost: paths.guestRootfs, IsRootDevice: true, IsReadOnly: false},
+			fcVsock{GuestCID: inst.cid, UDSPath: paths.guestVsock},
+			&fcLogger{LogPath: paths.guestLog, Level: "Info", ShowLevel: true},
+			nic,
 		)
 	}); err != nil {
 		inst.kill()
@@ -230,6 +244,8 @@ type firecrackerInstance struct {
 	client        *fcClient
 	stderr        *os.File
 	cgroupCleanup func() error
+	tap           *network.Link
+	tapTeardown   func(*network.Link) error
 	log           *slog.Logger
 	dead          atomic.Bool
 	waitOnce      sync.Once
@@ -303,6 +319,11 @@ func (i *firecrackerInstance) Destroy(ctx context.Context) error {
 	}
 	if i.cgroupCleanup != nil {
 		if err := i.cgroupCleanup(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if i.tap != nil && i.tapTeardown != nil {
+		if err := i.tapTeardown(i.tap); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -389,6 +410,70 @@ func (i *firecrackerInstance) cleanupFiles() error {
 	return os.RemoveAll(i.workDir)
 }
 
+type vmPaths struct {
+	hostRootfs  string
+	guestKernel string
+	guestRootfs string
+	guestVsock  string
+	guestLog    string
+}
+
+func (f *Firecracker) preparePaths(inst *firecrackerInstance) (vmPaths, error) {
+	if f.cfg.Jailer != "" {
+		layout, err := newJailLayout(f.cfg.WorkDir, f.cfg.Binary, inst.id)
+		if err != nil {
+			return vmPaths{}, err
+		}
+		if err := prepareJail(layout, f.cfg.Kernel, f.cfg.Rootfs); err != nil {
+			return vmPaths{}, err
+		}
+		inst.workDir = layout.JailDir
+		inst.apiSock = filepath.Join(layout.Root, "api.sock")
+		inst.vsockUDS = filepath.Join(layout.Root, "v.sock")
+		inst.logFile = filepath.Join(layout.Root, "firecracker.log")
+		return vmPaths{
+			hostRootfs:  filepath.Join(layout.Root, "rootfs.ext4"),
+			guestKernel: "/vmlinux",
+			guestRootfs: "/rootfs.ext4",
+			guestVsock:  "/v.sock",
+			guestLog:    "/firecracker.log",
+		}, nil
+	}
+
+	rootCopy := filepath.Join(inst.workDir, "rootfs.ext4")
+	if err := cloneFile(f.cfg.Rootfs, rootCopy); err != nil {
+		return vmPaths{}, fmt.Errorf("clone rootfs: %w", err)
+	}
+	logF, err := os.OpenFile(inst.logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
+		return vmPaths{}, fmt.Errorf("firecracker log: %w", err)
+	}
+	_ = logF.Close()
+	return vmPaths{
+		hostRootfs:  rootCopy,
+		guestKernel: f.cfg.Kernel,
+		guestRootfs: rootCopy,
+		guestVsock:  inst.vsockUDS,
+		guestLog:    inst.logFile,
+	}, nil
+}
+
+func (f *Firecracker) spawnCmd(inst *firecrackerInstance, _ vmPaths) (*exec.Cmd, error) {
+	// Do not use CommandContext: cancelling the boot ctx must not SIGKILL
+	// the VM while Execute is still running. Destroy owns the lifecycle.
+	if f.cfg.Jailer != "" {
+		layout, err := newJailLayout(f.cfg.WorkDir, f.cfg.Binary, inst.id)
+		if err != nil {
+			return nil, err
+		}
+		return jailerCommand(f.cfg, layout)
+	}
+	cmd := exec.Command(f.cfg.Binary, "--api-sock", inst.apiSock)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Dir = inst.workDir
+	return cmd, nil
+}
+
 func waitForSocket(ctx context.Context, path string, max time.Duration) error {
 	if max <= 0 {
 		max = 5 * time.Second
@@ -409,22 +494,4 @@ func waitForSocket(ctx context.Context, path string, max time.Duration) error {
 		case <-ticker.C:
 		}
 	}
-}
-
-func cloneFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
 }

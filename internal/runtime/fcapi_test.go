@@ -40,13 +40,24 @@ func TestFCClientConfigureAndStart(t *testing.T) {
 		fcDrive{DriveID: "rootfs", PathOnHost: "/r", IsRootDevice: true},
 		fcVsock{GuestCID: 3, UDSPath: "/v.sock"},
 		&fcLogger{LogPath: "/l", Level: "Info"},
+		nil,
 	); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.startInstance(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"/logger", "/machine-config", "/boot-source", "/drives/rootfs", "/vsock", "/actions"} {
+	if err := c.configure(ctx,
+		fcMachineConfig{VCPUCount: 1, MemSizeMiB: 128},
+		fcBootSource{KernelImagePath: "/k"},
+		fcDrive{DriveID: "rootfs", PathOnHost: "/r", IsRootDevice: true},
+		fcVsock{GuestCID: 4, UDSPath: "/v.sock"},
+		nil,
+		&fcNetIface{IfaceID: "eth0", GuestMAC: "06:00:ac:19:00:02", HostDevName: "wfc1"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/logger", "/machine-config", "/boot-source", "/drives/rootfs", "/vsock", "/actions", "/network-interfaces/eth0"} {
 		if got[p] == 0 {
 			t.Fatalf("missing PUT %s: %#v", p, got)
 		}

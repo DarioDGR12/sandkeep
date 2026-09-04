@@ -139,6 +139,9 @@ Variables de entorno:
 | `WARDEN_AUDIT_LOG` | `audit.jsonl` | Log JSONL |
 | `WARDEN_FC_BINARY` / `_KERNEL` / `_ROOTFS` | `assets/…` | Override de paths |
 | `WARDEN_CGROUP_REQUIRED` | unset | Si es `1`, Boot falla cuando no se puede crear el cgroup |
+| `WARDEN_JAILER` | unset | Path al binario jailer (vacío = Firecracker directo) |
+| `WARDEN_JAILER_SUDO` | unset | `1` para invocar el jailer con `sudo -n` |
+| `WARDEN_JAILER_UID` / `_GID` | usuario actual | Credenciales después del exec |
 
 ```bash
 curl -s localhost:8080/health
@@ -154,9 +157,9 @@ POST /execute
   → validar JSON y contrato
   → Limiter.Apply (validación de perfil)
   → Runtime.Boot
-        Firecracker: spawn VMM → cgroup al PID → API configure
-        → sin NIC si allowlist vacía → InstanceStart
-        → wait vsock + guest-agent
+        Firecracker: jailer (opt) → spawn VMM → cgroup al PID
+        → TAP+nft solo si allowlist no vacía
+        → API configure → InstanceStart → wait guest-agent
   → Instance.Execute (JSON por vsock; el guest exec python/node)
   → defer Instance.Destroy (SendCtrlAltDel, SIGKILL, borrar workdir)
   → Audit.Record
@@ -176,21 +179,29 @@ WARDEN_RUNTIME=firecracker go run ./cmd/warden
 
 Decisiones de fase 2 que importan:
 
-- **Sin TAP.** Allowlist vacía ⇒ no se crea interfaz de red. El guest no tiene L3. Eso *es* el filtro de egress. Si la allowlist tiene entradas, Boot **falla** (no mentimos con una VM “con red”).
-- **seccomp del VMM ≠ seccomp del guest.** Firecracker ya trae un filtro estricto para el proceso VMM (KVM ioctls). No le aplicamos `configs/seccomp.json`; ese perfil es para el jailer (siguiente paso).
-- **cgroups al PID de Firecracker**, no a un nombre compartido `pending-vm`. En contenedores sin cgroup delegado el attach es best-effort (`WARDEN_CGROUP_REQUIRED=1` para fail-closed).
-- **guest-agent es PID 1** (`init=/usr/local/bin/guest-agent`). Monta proc/sys/dev y escucha vsock :52.
-- **Una copia del rootfs por VM** para no compartir escrituras. Pesado; snapshots/reflink vienen después.
-- **KVM anidado.** Firecracker necesita crear vCPUs. En algunos hosts virtualizados (este Cloud Agent incluido) `KVM_CREATE_VCPU` provoca un oops del kernel; el runtime detecta que el VMM murió y lo reporta. En un `.metal` o una máquina con KVM no anidado, `WARDEN_ITEST=1 go test ./internal/runtime -run TestFirecrackerRealVM` es el smoke test.
+- **Sin TAP si allowlist vacía.** El guest no tiene L3. Si hay destinos, se crea un TAP `/30` (172.25.x.x), NAT masquerade y una tabla nft **fail-closed** (forward policy drop; solo IPs resueltas de la allowlist). El guest recibe IP por `ip=` en la cmdline del kernel.
+- **Jailer opcional.** `WARDEN_JAILER=assets/jailer` (y casi siempre `WARDEN_JAILER_SUDO=1`): chroot en `{work_dir}/firecracker/<id>/root`, drop a uid/gid no-root, `/dev/kvm` + `/dev/net/tun` dentro del jail. El VMM ve `/vmlinux`, `/rootfs.ext4`, `/api.sock`.
+- **seccomp del VMM ≠ seccomp del guest.** El jailer/Firecracker traen el filtro del VMM. `configs/seccomp.json` no se inyecta al proceso KVM.
+- **cgroups.** Sin jailer: attach best-effort al PID. Con jailer: `--cgroup-version 2` si `WARDEN_JAILER_CGROUP=1`.
+- **Copia del rootfs:** `cp --reflink=auto` y fallback a copy. El kernel se hardlinkea (es read-only).
+- **KVM anidado.** En este Cloud Agent `KVM_CREATE_VCPU` hace oops. En un `.metal`: `WARDEN_ITEST=1 go test ./internal/runtime -run TestFirecrackerRealVM`.
+
+Jailer:
+
+```bash
+WARDEN_RUNTIME=firecracker \
+WARDEN_JAILER=assets/jailer \
+WARDEN_JAILER_SUDO=1 \
+go run ./cmd/warden
+```
 
 ## Lo que esto NO es (aún)
 
-- Jailer (chroot + uid drop + seccomp custom del VMM)
-- TAP + iptables para una allowlist no vacía
 - Authn (API key, mTLS) — no exponer esto a Internet
 - Rate limit ni cola de VMs
 - Snapshots de sesión (`internal/snapshot`)
 - Auditoría durable (el JSONL se pierde en cada deploy)
+- netns dedicado por VM (el TAP vive en el netns del host)
 
 ## Licencia
 

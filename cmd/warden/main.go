@@ -69,6 +69,7 @@ func run() error {
 			Log:     log,
 			Require: os.Getenv("WARDEN_CGROUP_REQUIRED") == "1",
 		}
+		fcCfg.Tap = network.NewTAP(log)
 		rt = runtime.NewFirecrackerWithConfig(fcCfg)
 	}
 

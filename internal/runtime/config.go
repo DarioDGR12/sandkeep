@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DarioDGR12/sandkeep/internal/guestproto"
+	"github.com/DarioDGR12/sandkeep/internal/network"
 	"github.com/DarioDGR12/sandkeep/internal/resources"
 )
 
@@ -17,15 +18,22 @@ var ErrMissingAssets = fmt.Errorf("firecracker assets missing")
 
 // Config is host-side Firecracker settings. Paths are required for a real boot.
 type Config struct {
-	Binary      string        `json:"binary"`
-	Kernel      string        `json:"kernel"`
-	Rootfs      string        `json:"rootfs"`
-	WorkDir     string        `json:"work_dir"`
-	BootArgs    string        `json:"boot_args"`
-	AgentPort   uint32        `json:"agent_port"`
-	BootTimeout time.Duration `json:"-"`
-	VCPUCount   int           `json:"vcpu_count"`
-	Cgroup      resources.CgroupAttacher
+	Binary       string        `json:"binary"`
+	Kernel       string        `json:"kernel"`
+	Rootfs       string        `json:"rootfs"`
+	WorkDir      string        `json:"work_dir"`
+	BootArgs     string        `json:"boot_args"`
+	AgentPort    uint32        `json:"agent_port"`
+	BootTimeout  time.Duration `json:"-"`
+	VCPUCount    int           `json:"vcpu_count"`
+	Jailer       string        `json:"jailer"`
+	JailerUID    int           `json:"jailer_uid"`
+	JailerGID    int           `json:"jailer_gid"`
+	JailerSudo   bool          `json:"jailer_sudo"`
+	JailerCgroup bool          `json:"jailer_cgroup"`
+	NewPIDNS     bool          `json:"new_pid_ns"`
+	Cgroup       resources.CgroupAttacher
+	Tap          network.TapFactory
 }
 
 const defaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent"
@@ -95,6 +103,24 @@ func overlayEnv(cfg *Config) {
 			cfg.BootTimeout = d
 		}
 	}
+	if v := os.Getenv("WARDEN_JAILER"); v != "" {
+		cfg.Jailer = v
+	}
+	if v := os.Getenv("WARDEN_JAILER_UID"); v != "" {
+		fmt.Sscanf(v, "%d", &cfg.JailerUID)
+	}
+	if v := os.Getenv("WARDEN_JAILER_GID"); v != "" {
+		fmt.Sscanf(v, "%d", &cfg.JailerGID)
+	}
+	if os.Getenv("WARDEN_JAILER_SUDO") == "1" {
+		cfg.JailerSudo = true
+	}
+	if os.Getenv("WARDEN_JAILER_CGROUP") == "1" {
+		cfg.JailerCgroup = true
+	}
+	if os.Getenv("WARDEN_JAILER_NEWPID") == "1" {
+		cfg.NewPIDNS = true
+	}
 }
 
 // Validate checks that the three boot assets exist and are readable.
@@ -113,6 +139,15 @@ func (c Config) Validate() error {
 		}
 		if st.IsDir() {
 			return fmt.Errorf("%w: %s %s is a directory", ErrMissingAssets, p.name, p.path)
+		}
+	}
+	if c.Jailer != "" {
+		st, err := os.Stat(c.Jailer)
+		if err != nil {
+			return fmt.Errorf("%w: jailer %s: %v", ErrMissingAssets, c.Jailer, err)
+		}
+		if st.IsDir() {
+			return fmt.Errorf("%w: jailer %s is a directory", ErrMissingAssets, c.Jailer)
 		}
 	}
 	return nil

@@ -59,6 +59,12 @@ type fcLogger struct {
 	ShowLogOrigin bool   `json:"show_log_origin"`
 }
 
+type fcNetIface struct {
+	IfaceID     string `json:"iface_id"`
+	GuestMAC    string `json:"guest_mac"`
+	HostDevName string `json:"host_dev_name"`
+}
+
 type fcAction struct {
 	ActionType string `json:"action_type"`
 }
@@ -95,7 +101,7 @@ func (c *fcClient) put(ctx context.Context, path string, body any) error {
 	return nil
 }
 
-func (c *fcClient) configure(ctx context.Context, machine fcMachineConfig, boot fcBootSource, drive fcDrive, vsock fcVsock, logger *fcLogger) error {
+func (c *fcClient) configure(ctx context.Context, machine fcMachineConfig, boot fcBootSource, drive fcDrive, vsock fcVsock, logger *fcLogger, nic *fcNetIface) error {
 	if logger != nil {
 		if err := c.put(ctx, "/logger", logger); err != nil {
 			return err
@@ -112,6 +118,11 @@ func (c *fcClient) configure(ctx context.Context, machine fcMachineConfig, boot 
 	}
 	if err := c.put(ctx, "/vsock", vsock); err != nil {
 		return err
+	}
+	if nic != nil {
+		if err := c.put(ctx, "/network-interfaces/"+nic.IfaceID, nic); err != nil {
+			return err
+		}
 	}
 	return nil
 }
