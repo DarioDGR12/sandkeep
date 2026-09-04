@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,12 @@ func TestJailerCreatesAPISocket(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected KVM/start failure after jailer API came up")
+	}
+	if !strings.Contains(err.Error(), "InstanceStart") {
+		t.Fatalf("jailer never reached InstanceStart (API/chroot failed): %v", err)
+	}
+	if !strings.Contains(err.Error(), "/vmlinux") && !strings.Contains(err.Error(), "\"/vmlinux\"") {
+		t.Fatalf("expected jailed kernel path in log: %v", err)
 	}
 	t.Log(err)
 }
