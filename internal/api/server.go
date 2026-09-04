@@ -21,6 +21,7 @@ import (
 // Config is process-wide HTTP settings.
 type Config struct {
 	Addr            string
+	APIKey          string
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration
@@ -50,6 +51,7 @@ type Dependencies struct {
 	Snapshots   snapshot.Store
 	Log         *slog.Logger
 	BootTimeout time.Duration
+	QueueWait   time.Duration
 }
 
 // Server is the HTTP API.
@@ -117,6 +119,21 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}()
 
 		rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		if s.cfg.APIKey != "" && r.URL.Path != "/health" {
+			if !apiKeyEqual(tokenFromRequest(r), s.cfg.APIKey) {
+				s.recordAudit(ExecuteRequest{}, requestID, runtime.Result{}, 0, errUnauthorized)
+				writeError(rw, requestID, http.StatusUnauthorized, CodeUnauthorized, "unauthorized")
+				s.deps.Log.Info("http",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", rw.status,
+					"duration_ms", time.Since(start).Milliseconds(),
+					"request_id", requestID,
+					"remote", remoteHost(r),
+				)
+				return
+			}
+		}
 		next.ServeHTTP(rw, r)
 		s.deps.Log.Info("http",
 			"method", r.Method,

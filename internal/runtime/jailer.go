@@ -57,14 +57,17 @@ func validateJailerID(id string) error {
 
 // prepareJail creates the chroot tree and places kernel + rootfs where the
 // jailed VMM will look for them (/vmlinux, /rootfs.ext4).
-func prepareJail(layout jailLayout, kernel, rootfs string) error {
+func prepareJail(layout jailLayout, kernel, rootfs string, place func(src, dst string) error) error {
+	if place == nil {
+		place = cloneFile
+	}
 	if err := os.MkdirAll(layout.Root, 0o750); err != nil {
 		return fmt.Errorf("jailer mkdir %s: %w", layout.Root, err)
 	}
 	if err := linkOrCopy(kernel, filepath.Join(layout.Root, "vmlinux")); err != nil {
 		return fmt.Errorf("jailer kernel: %w", err)
 	}
-	if err := cloneFile(rootfs, filepath.Join(layout.Root, "rootfs.ext4")); err != nil {
+	if err := place(rootfs, filepath.Join(layout.Root, "rootfs.ext4")); err != nil {
 		return fmt.Errorf("jailer rootfs: %w", err)
 	}
 	logPath := filepath.Join(layout.Root, "firecracker.log")

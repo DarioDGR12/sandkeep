@@ -42,6 +42,8 @@ const (
 	CodeMethodNotAllow = "method_not_allowed"
 	CodeInternal       = "internal_error"
 	CodeUnavailable    = "backend_unavailable"
+	CodeUnauthorized   = "unauthorized"
+	CodeBusy           = "busy"
 )
 
 const (
@@ -51,6 +53,7 @@ const (
 	MaxTimeoutS     = 300
 	MaxSessionIDLen = 128
 	HeaderRequestID = "X-Request-Id"
+	HeaderAPIKey    = "X-Api-Key"
 )
 
 func resultToResponse(req ExecuteRequest, requestID string, backend string, res runtime.Result, durationMS int64) ExecuteResponse {

@@ -65,6 +65,9 @@ func NewFirecrackerWithConfig(cfg Config) *Firecracker {
 	if cfg.Snapshots == nil && cfg.SnapshotDir != "" {
 		cfg.Snapshots = snapshot.NewDirStore(cfg.SnapshotDir)
 	}
+	if cfg.Pool == nil && cfg.RootfsPoolSize > 0 && cfg.Rootfs != "" && cfg.WorkDir != "" {
+		cfg.Pool = NewFilePool(cfg.Rootfs, filepath.Join(cfg.WorkDir, "pool"), cfg.RootfsPoolSize)
+	}
 	f := &Firecracker{cfg: cfg, log: slog.Default()}
 	f.cids.Store(2) // next CID is 3 (0-2 are reserved)
 	return f
@@ -491,7 +494,7 @@ func (f *Firecracker) preparePathsFrom(inst *firecrackerInstance, rootfsSrc stri
 		if err != nil {
 			return vmPaths{}, err
 		}
-		if err := prepareJail(layout, f.cfg.Kernel, rootfsSrc); err != nil {
+		if err := prepareJail(layout, f.cfg.Kernel, rootfsSrc, f.placeRootfs); err != nil {
 			return vmPaths{}, err
 		}
 		inst.jailed = true
@@ -517,7 +520,7 @@ func (f *Firecracker) preparePathsFrom(inst *firecrackerInstance, rootfsSrc stri
 		rootCopy = inst.snapRec.RootfsPath
 		inst.vsockUDS = filepath.Join(inst.snapRec.Path, "v.sock")
 	}
-	if err := cloneFile(rootfsSrc, rootCopy); err != nil {
+	if err := f.placeRootfs(rootfsSrc, rootCopy); err != nil {
 		return vmPaths{}, fmt.Errorf("clone rootfs: %w", err)
 	}
 	logF, err := os.OpenFile(inst.logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
@@ -533,6 +536,13 @@ func (f *Firecracker) preparePathsFrom(inst *firecrackerInstance, rootfsSrc stri
 		guestVsock:  inst.vsockUDS,
 		guestLog:    inst.logFile,
 	}, nil
+}
+
+func (f *Firecracker) placeRootfs(src, dst string) error {
+	if f.cfg.Pool != nil && absPath(src) == absPath(f.cfg.Rootfs) {
+		return f.cfg.Pool.Acquire(dst)
+	}
+	return cloneFile(src, dst)
 }
 
 func (f *Firecracker) spawnCmd(inst *firecrackerInstance, _ vmPaths) (*exec.Cmd, error) {

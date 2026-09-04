@@ -19,24 +19,26 @@ var ErrMissingAssets = fmt.Errorf("firecracker assets missing")
 
 // Config is host-side Firecracker settings. Paths are required for a real boot.
 type Config struct {
-	Binary       string        `json:"binary"`
-	Kernel       string        `json:"kernel"`
-	Rootfs       string        `json:"rootfs"`
-	WorkDir      string        `json:"work_dir"`
-	BootArgs     string        `json:"boot_args"`
-	AgentPort    uint32        `json:"agent_port"`
-	BootTimeout  time.Duration `json:"-"`
-	VCPUCount    int           `json:"vcpu_count"`
-	Jailer       string        `json:"jailer"`
-	JailerUID    int           `json:"jailer_uid"`
-	JailerGID    int           `json:"jailer_gid"`
-	JailerSudo   bool          `json:"jailer_sudo"`
-	JailerCgroup bool          `json:"jailer_cgroup"`
-	NewPIDNS     bool          `json:"new_pid_ns"`
-	SnapshotDir  string        `json:"snapshot_dir"`
-	Cgroup       resources.CgroupAttacher
-	Tap          network.TapFactory
-	Snapshots    snapshot.Store
+	Binary         string        `json:"binary"`
+	Kernel         string        `json:"kernel"`
+	Rootfs         string        `json:"rootfs"`
+	WorkDir        string        `json:"work_dir"`
+	BootArgs       string        `json:"boot_args"`
+	AgentPort      uint32        `json:"agent_port"`
+	BootTimeout    time.Duration `json:"-"`
+	VCPUCount      int           `json:"vcpu_count"`
+	Jailer         string        `json:"jailer"`
+	JailerUID      int           `json:"jailer_uid"`
+	JailerGID      int           `json:"jailer_gid"`
+	JailerSudo     bool          `json:"jailer_sudo"`
+	JailerCgroup   bool          `json:"jailer_cgroup"`
+	NewPIDNS       bool          `json:"new_pid_ns"`
+	SnapshotDir    string        `json:"snapshot_dir"`
+	RootfsPoolSize int           `json:"rootfs_pool_size"`
+	Cgroup         resources.CgroupAttacher
+	Tap            network.TapFactory
+	Snapshots      snapshot.Store
+	Pool           DiskPool
 }
 
 const defaultBootArgs = "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent"
@@ -127,6 +129,9 @@ func overlayEnv(cfg *Config) {
 	}
 	if v := os.Getenv("WARDEN_SNAPSHOT_DIR"); v != "" {
 		cfg.SnapshotDir = v
+	}
+	if v := os.Getenv("WARDEN_ROOTFS_POOL"); v != "" {
+		fmt.Sscanf(v, "%d", &cfg.RootfsPoolSize)
 	}
 }
 

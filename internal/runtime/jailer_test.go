@@ -36,7 +36,7 @@ func TestJailLayoutAndPrepare(t *testing.T) {
 	if layout.Root != filepath.Join(dir, "firecracker", "fc-9", "root") {
 		t.Fatalf("root=%s", layout.Root)
 	}
-	if err := prepareJail(layout, kernel, rootfs); err != nil {
+	if err := prepareJail(layout, kernel, rootfs, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"vmlinux", "rootfs.ext4", "firecracker.log"} {

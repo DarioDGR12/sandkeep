@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -160,6 +161,31 @@ func TestExecuteBodyTooLarge(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestExecuteBusyIs429(t *testing.T) {
+	h := testServer(t, busyRuntime{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var errBody api.ErrorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+		t.Fatal(err)
+	}
+	if errBody.Code != api.CodeBusy {
+		t.Fatalf("code=%q", errBody.Code)
+	}
+}
+
+type busyRuntime struct{}
+
+func (busyRuntime) Name() string { return "busy" }
+
+func (busyRuntime) Boot(context.Context, runtime.Spec) (runtime.Instance, error) {
+	return nil, runtime.ErrBusy
 }
 
 func TestExecuteFirecrackerUnavailable(t *testing.T) {

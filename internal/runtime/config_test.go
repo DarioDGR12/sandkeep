@@ -63,6 +63,7 @@ func TestBootRejectsAllowlist(t *testing.T) {
 func TestLoadConfigEnvOverlay(t *testing.T) {
 	t.Setenv("WARDEN_FC_BINARY", "/opt/fc")
 	t.Setenv("WARDEN_SNAPSHOT_DIR", "/var/lib/warden/snaps")
+	t.Setenv("WARDEN_ROOTFS_POOL", "4")
 	cfg, err := runtime.LoadConfig("")
 	if err != nil {
 		t.Fatal(err)
@@ -72,5 +73,8 @@ func TestLoadConfigEnvOverlay(t *testing.T) {
 	}
 	if cfg.SnapshotDir != "/var/lib/warden/snaps" {
 		t.Fatalf("snapshot_dir=%s", cfg.SnapshotDir)
+	}
+	if cfg.RootfsPoolSize != 4 {
+		t.Fatalf("pool=%d", cfg.RootfsPoolSize)
 	}
 }

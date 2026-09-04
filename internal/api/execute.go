@@ -86,6 +86,9 @@ func (s *Server) run(ctx context.Context, req ExecuteRequest) (runtime.Result, e
 	}
 
 	bootTimeout := s.bootTimeout()
+	if s.deps.QueueWait > 0 {
+		bootTimeout += s.deps.QueueWait
+	}
 	bootCtx, bootCancel := context.WithTimeout(ctx, bootTimeout)
 	defer bootCancel()
 
@@ -148,6 +151,9 @@ func (s *Server) recordAudit(req ExecuteRequest, requestID string, res runtime.R
 func mapExecError(err error) (status int, code, msg string) {
 	if errors.Is(err, runtime.ErrNotImplemented) || errors.Is(err, runtime.ErrMissingAssets) {
 		return http.StatusServiceUnavailable, CodeUnavailable, "firecracker backend is not ready"
+	}
+	if errors.Is(err, runtime.ErrBusy) {
+		return http.StatusTooManyRequests, CodeBusy, "too many concurrent VMs"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return http.StatusGatewayTimeout, CodeInternal, "execution timed out before a VM result"

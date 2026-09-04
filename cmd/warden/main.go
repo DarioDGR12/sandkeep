@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -79,11 +80,36 @@ func run() error {
 			snaps = snapshot.NewDirStore(fcCfg.SnapshotDir)
 			fcCfg.Snapshots = snaps
 		}
+		if os.Getenv("WARDEN_ROOTFS_POOL") == "0" {
+			fcCfg.RootfsPoolSize = 0
+		} else if fcCfg.RootfsPoolSize <= 0 {
+			fcCfg.RootfsPoolSize = 2
+		}
 		rt = runtime.NewFirecrackerWithConfig(fcCfg)
 	}
 
+	maxVMs := 1
+	if v := os.Getenv("WARDEN_MAX_VMS"); v != "" {
+		fmt.Sscanf(v, "%d", &maxVMs)
+	}
+	queueWait := 15 * time.Second
+	if v := os.Getenv("WARDEN_VM_QUEUE_WAIT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			queueWait = d
+		}
+	}
+	rt = runtime.NewGate(rt, maxVMs, queueWait)
+
+	apiKey := strings.TrimSpace(os.Getenv("WARDEN_API_KEY"))
+	allowAnon := os.Getenv("WARDEN_ALLOW_ANON") == "1"
+	if err := api.CheckBind(listen, apiKey, allowAnon); err != nil {
+		return err
+	}
+
+	httpCfg := api.DefaultConfig(listen)
+	httpCfg.APIKey = apiKey
 	cgroupLimiter := resources.NoopLimiter{Log: log}
-	srv := api.NewServer(api.DefaultConfig(listen), api.Dependencies{
+	srv := api.NewServer(httpCfg, api.Dependencies{
 		Runtime:     rt,
 		Limiter:     cgroupLimiter,
 		Limits:      limits,
@@ -93,6 +119,7 @@ func run() error {
 		Snapshots:   snaps,
 		Log:         log,
 		BootTimeout: 20 * time.Second,
+		QueueWait:   queueWait,
 	})
 
 	ready := "unknown"
@@ -113,6 +140,8 @@ func run() error {
 		"egress_allowlist", len(netPolicy.Allowlist),
 		"memory_bytes", limits.MemoryBytes,
 		"snapshots", fmt.Sprintf("%T", snaps),
+		"auth", apiKey != "",
+		"max_vms", maxVMs,
 	)
 
 	errCh := make(chan error, 1)
@@ -142,9 +171,12 @@ func listenAddr() string {
 	if addr := os.Getenv("WARDEN_ADDR"); addr != "" {
 		return addr
 	}
-	port := envOr("PORT", "8080")
-	// Bind all interfaces so cloud proxies (Render, etc.) can reach us.
-	return "0.0.0.0:" + port
+	if port := os.Getenv("PORT"); port != "" {
+		// Cloud proxies inject PORT and expect all interfaces.
+		return "0.0.0.0:" + port
+	}
+	// Local default is loopback so `go run` does not need an API key.
+	return "127.0.0.1:8080"
 }
 
 func envOr(key, fallback string) string {

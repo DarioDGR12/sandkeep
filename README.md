@@ -72,8 +72,8 @@ Exit code ≠ 0 y timeout de guest son resultados válidos para un agente (`exit
 **7. Auditoría sin payload infinito.**
 Cada evento guarda `code_sha256`, tamaño, preview de 256 bytes, `session_id`, `vm_id`, timestamps y resultado. El disco local es efímero en PaaS (Render, etc.); el JSONL es un buffer, no la fuente de verdad a largo plazo.
 
-**8. Bind `0.0.0.0:$PORT`.**
-Plataformas cloud inyectan `PORT`. Escuchar solo en `127.0.0.1` hace el servicio inalcanzable detrás del proxy.
+**8. Bind y auth.**
+Local (`go run` sin `PORT`): `127.0.0.1:8080`, sin API key. Cloud (`PORT` inyectado): `0.0.0.0:$PORT` y **exige** `WARDEN_API_KEY`. `/health` sigue público para el load balancer.
 
 ## API
 
@@ -120,6 +120,8 @@ Respuesta 200:
 
 El body HTTP está limitado a 1 MiB. Campos JSON desconocidos se rechazan.
 
+Auth: `X-Api-Key` o `Authorization: Bearer <key>`. Sin clave válida → 401 y no se arranca VM. Cola llena → 429 `busy`.
+
 ## Cómo correrlo
 
 Requiere Go 1.22+.
@@ -133,7 +135,12 @@ Variables de entorno:
 
 | Variable | Default | Qué hace |
 | --- | --- | --- |
-| `PORT` / `WARDEN_ADDR` | `8080` / `0.0.0.0:8080` | Listen |
+| `PORT` / `WARDEN_ADDR` | unset → `127.0.0.1:8080` | `PORT` implica `0.0.0.0:$PORT` |
+| `WARDEN_API_KEY` | unset | Obligatoria en bind público |
+| `WARDEN_ALLOW_ANON` | unset | `1` override (solo red de confianza) |
+| `WARDEN_MAX_VMS` | `1` | VMs concurrentes; extra espera en cola |
+| `WARDEN_VM_QUEUE_WAIT` | `15s` | Timeout de la cola → 429 |
+| `WARDEN_ROOTFS_POOL` | `2` (firecracker) | Clones precalentados; `0` desactiva |
 | `WARDEN_RUNTIME` | `stub` | `stub` o `firecracker` |
 | `WARDEN_CONFIG_DIR` | `configs` | Perfiles + `firecracker.json` |
 | `WARDEN_AUDIT_LOG` | `audit.jsonl` | Log JSONL |
@@ -149,6 +156,7 @@ Variables de entorno:
 curl -s localhost:8080/health
 curl -s -X POST localhost:8080/execute \
   -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: dev' \
   -d '{"code":"print(1+1)","runtime":"python","timeout":10,"session_id":"demo"}'
 ```
 
@@ -156,7 +164,9 @@ curl -s -X POST localhost:8080/execute \
 
 ```
 POST /execute
+  → auth (si hay API key; /health no)
   → validar JSON y contrato
+  → cola de VMs (Gate, max N)
   → Limiter.Apply (validación de perfil)
   → Runtime.Boot
         Firecracker: restore snapshot si session_id tiene meta
@@ -187,9 +197,10 @@ Decisiones de fase 2 que importan:
 - **Jailer opcional.** `WARDEN_JAILER=assets/jailer` (y casi siempre `WARDEN_JAILER_SUDO=1`): chroot en `{work_dir}/firecracker/<id>/root`, drop a uid/gid no-root, `/dev/kvm` + `/dev/net/tun` dentro del jail. El VMM ve `/vmlinux`, `/rootfs.ext4`, `/api.sock`.
 - **seccomp del VMM ≠ seccomp del guest.** El jailer/Firecracker traen el filtro del VMM. `configs/seccomp.json` no se inyecta al proceso KVM.
 - **cgroups.** Sin jailer: attach best-effort al PID. Con jailer: `--cgroup-version 2` si `WARDEN_JAILER_CGROUP=1`.
-- **Copia del rootfs:** `cp --reflink=auto` y fallback a copy. El kernel se hardlinkea (es read-only). El store de sesión vive en `data/snapshots/` (nunca dentro del workdir de la VM: Destroy borra ese árbol).
+- **Copia del rootfs:** pool de N clones precalentados (`data/vms/pool/`). Un miss clona en el momento. Nunca se devuelve un disco sucio al pool. `cp --reflink=auto` con fallback a copy. El kernel se hardlinkea. El store de sesión vive en `data/snapshots/` (nunca dentro del workdir de la VM).
 - **Snapshots.** `PATCH /vm` pause → `PUT /snapshot/create` (Full). Restore: proceso fresco, solo logger, `PUT /snapshot/load` + `resume_vm`. El TAP se recrea con los **mismos** nombres/IPs (el `host_dev_name` va en el snap).
 - **KVM anidado.** En este Cloud Agent `KVM_CREATE_VCPU` hace oops. En un `.metal`: `WARDEN_ITEST=1 go test ./internal/runtime -run TestFirecrackerRealVM`.
+- **Auth + cola.** Bind público sin `WARDEN_API_KEY` no arranca. `Gate` limita VMs vivas (default 1); el overflow espera `WARDEN_VM_QUEUE_WAIT` y si no hay hueco responde 429. El slot se libera en `Destroy`, también si Boot falla.
 
 Jailer:
 
@@ -202,9 +213,8 @@ go run ./cmd/warden
 
 ## Lo que esto NO es (aún)
 
-- Authn (API key, mTLS) — no exponer esto a Internet
-- Rate limit ni cola de VMs
-- Diff snapshots / pool de rootfs prewarmed
+- mTLS / OAuth (la API key es el MVP)
+- Diff snapshots
 - Auditoría durable (el JSONL se pierde en cada deploy)
 
 ## Licencia
