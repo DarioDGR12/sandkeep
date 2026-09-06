@@ -44,6 +44,7 @@ const (
 	CodeUnavailable    = "backend_unavailable"
 	CodeUnauthorized   = "unauthorized"
 	CodeBusy           = "busy"
+	CodeRateLimited    = "rate_limited"
 	CodeAuditFailed    = "audit_failed"
 )
 

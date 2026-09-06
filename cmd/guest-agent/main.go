@@ -101,7 +101,15 @@ func execute(req guestproto.Request) guestproto.Response {
 	cmd.Stderr = &stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return guestproto.Response{Stderr: err.Error(), ExitCode: 1}
+	}
+	if err := applyGuestLimits(cmd.Process.Pid, req); err != nil {
+		killProcessGroup(cmd)
+		_ = cmd.Wait()
+		return guestproto.Response{Stderr: "guest: rlimit: " + err.Error(), ExitCode: 1}
+	}
+	runErr := cmd.Wait()
 	resp := guestproto.Response{
 		Stdout: stdout.String(),
 		Stderr: stderr.String(),
@@ -158,6 +166,36 @@ func firstExisting(names ...string) string {
 		}
 	}
 	return ""
+}
+
+func applyGuestLimits(pid int, req guestproto.Request) error {
+	mem := req.MemoryBytes
+	if mem <= 0 {
+		mem = 256 << 20
+	}
+	if mem < 16<<20 {
+		mem = 16 << 20
+	}
+	pids := req.PIDsMax
+	if pids <= 0 {
+		pids = 64
+	}
+	if pids < 1 {
+		pids = 1
+	}
+	as := unix.Rlimit{Cur: uint64(mem), Max: uint64(mem)}
+	if err := unix.Prlimit(pid, unix.RLIMIT_AS, &as, nil); err != nil {
+		return fmt.Errorf("RLIMIT_AS: %w", err)
+	}
+	nproc := unix.Rlimit{Cur: uint64(pids), Max: uint64(pids)}
+	if err := unix.Prlimit(pid, unix.RLIMIT_NPROC, &nproc, nil); err != nil {
+		return fmt.Errorf("RLIMIT_NPROC: %w", err)
+	}
+	nofile := unix.Rlimit{Cur: 256, Max: 256}
+	if err := unix.Prlimit(pid, unix.RLIMIT_NOFILE, &nofile, nil); err != nil {
+		return fmt.Errorf("RLIMIT_NOFILE: %w", err)
+	}
+	return nil
 }
 
 func killProcessGroup(cmd *exec.Cmd) {

@@ -81,8 +81,8 @@ func (s *Server) run(ctx context.Context, req ExecuteRequest) (runtime.Result, e
 		Network:   s.deps.Network.Policy(),
 	}
 
-	// Resource limits wrap the VM process. In phase 1 this is a staged noop
-	// so the call order matches the future jailer integration.
+	// Validate profiles before Boot. Cgroup attach needs a live VMM PID and
+	// happens inside Firecracker.Boot — this call must not claim it did.
 	if s.deps.Limiter != nil {
 		if err := s.deps.Limiter.Apply("pending-vm", spec.Limits, spec.Seccomp); err != nil {
 			return runtime.Result{}, err

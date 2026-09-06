@@ -146,7 +146,8 @@ func run() error {
 	httpCfg.MTLS = mtls
 	httpCfg.RequireAll = os.Getenv("WARDEN_AUTH_REQUIRE_ALL") == "1"
 	httpCfg.MTLSSuffices = !httpCfg.RequireAll
-	cgroupLimiter := resources.NoopLimiter{Log: log}
+	httpCfg.Rate = buildRateLimit(listen)
+	cgroupLimiter := resources.ProfileLimiter{Log: log}
 	srv := api.NewServer(httpCfg, api.Dependencies{
 		Runtime:     rt,
 		Limiter:     cgroupLimiter,
@@ -184,6 +185,7 @@ func run() error {
 		"tls", tlsCfg != nil,
 		"mtls", mtls,
 		"max_vms", maxVMs,
+		"rate_limit", rateLimitInfo(httpCfg.Rate),
 	)
 
 	errCh := make(chan error, 1)
@@ -207,6 +209,33 @@ func run() error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutCtx)
+}
+
+func buildRateLimit(listen string) *api.FixedWindow {
+	raw := strings.TrimSpace(os.Getenv("WARDEN_RATE_LIMIT"))
+	limit := 0
+	if raw != "" {
+		fmt.Sscanf(raw, "%d", &limit)
+	} else if !api.IsLoopbackAddr(listen) {
+		limit = 60
+	}
+	if limit <= 0 {
+		return nil
+	}
+	window := time.Minute
+	if v := strings.TrimSpace(os.Getenv("WARDEN_RATE_WINDOW")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			window = d
+		}
+	}
+	return api.NewFixedWindow(limit, window)
+}
+
+func rateLimitInfo(r *api.FixedWindow) string {
+	if r == nil || r.Limit <= 0 {
+		return "off"
+	}
+	return fmt.Sprintf("%d/%s", r.Limit, r.Window)
 }
 
 func listenAddr() string {

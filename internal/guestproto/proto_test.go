@@ -11,9 +11,11 @@ import (
 func TestRequestRoundTripWithNewlinesInCode(t *testing.T) {
 	var buf bytes.Buffer
 	req := guestproto.Request{
-		Code:     "print(1)\nprint(2)\n",
-		Runtime:  "python",
-		TimeoutS: 10,
+		Code:        "print(1)\nprint(2)\n",
+		Runtime:     "python",
+		TimeoutS:    10,
+		MemoryBytes: 256 << 20,
+		PIDsMax:     64,
 	}
 	if err := guestproto.WriteRequest(&buf, req); err != nil {
 		t.Fatal(err)

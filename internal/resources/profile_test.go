@@ -32,6 +32,13 @@ func TestLoadRepoConfigs(t *testing.T) {
 	}
 }
 
+func TestSeccompValidateRequiresRules(t *testing.T) {
+	s := resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO"}
+	if err := s.Validate(); err == nil {
+		t.Fatal("empty syscall list must fail")
+	}
+}
+
 func TestRejectOpenSeccomp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seccomp.json")

@@ -20,9 +20,11 @@ const MaxOutputBytes = 1 << 20
 
 // Request is what the host sends after the vsock CONNECT handshake.
 type Request struct {
-	Code     string `json:"code"`
-	Runtime  string `json:"runtime"`
-	TimeoutS int    `json:"timeout_s"`
+	Code        string `json:"code"`
+	Runtime     string `json:"runtime"`
+	TimeoutS    int    `json:"timeout_s"`
+	MemoryBytes int64  `json:"memory_bytes,omitempty"`
+	PIDsMax     int64  `json:"pids_max,omitempty"`
 }
 
 // Response is the guest result. TimedOut means the guest killed the job.

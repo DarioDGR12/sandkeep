@@ -28,6 +28,7 @@ type Config struct {
 	MTLS            bool
 	MTLSSuffices    bool
 	RequireAll      bool
+	Rate            *FixedWindow
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration
@@ -152,6 +153,18 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			}
 			r = r.WithContext(context.WithValue(r.Context(), ctxAuthMethod, method))
 			r = r.WithContext(context.WithValue(r.Context(), ctxClientCN, cn))
+			if s.cfg.Rate != nil && !s.cfg.Rate.Allow(rateKey(r, method, cn)) {
+				writeError(rw, requestID, http.StatusTooManyRequests, CodeRateLimited, "rate limit exceeded")
+				s.deps.Log.Info("http",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", rw.status,
+					"duration_ms", time.Since(start).Milliseconds(),
+					"request_id", requestID,
+					"remote", remoteHost(r),
+				)
+				return
+			}
 		}
 		next.ServeHTTP(rw, r)
 		s.deps.Log.Info("http",

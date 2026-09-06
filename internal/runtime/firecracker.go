@@ -16,6 +16,7 @@ import (
 
 	"github.com/DarioDGR12/sandkeep/internal/guestproto"
 	"github.com/DarioDGR12/sandkeep/internal/network"
+	"github.com/DarioDGR12/sandkeep/internal/resources"
 	"github.com/DarioDGR12/sandkeep/internal/snapshot"
 )
 
@@ -134,6 +135,7 @@ func (f *Firecracker) bootOne(ctx context.Context, spec Spec, rec *snapshot.Reco
 		id:        id,
 		language:  spec.Language,
 		sessionID: spec.SessionID,
+		limits:    spec.Limits,
 		store:     f.cfg.Snapshots,
 		cid:       cid,
 		port:      f.cfg.AgentPort,
@@ -227,13 +229,9 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 	inst.stderr = stderr
 	go inst.reap()
 
-	if f.cfg.Cgroup != nil && f.cfg.Jailer == "" {
-		cleanup, err := f.cfg.Cgroup.Attach(inst.id, cmd.Process.Pid, spec.Limits)
-		if err != nil {
-			inst.kill()
-			return err
-		}
-		inst.cgroupCleanup = cleanup
+	if err := f.attachCgroup(inst, spec, cmd.Process.Pid); err != nil {
+		inst.kill()
+		return err
 	}
 
 	if err := waitForSocket(ctx, inst.apiSock, 5*time.Second); err != nil {
@@ -287,6 +285,7 @@ type firecrackerInstance struct {
 	id            string
 	language      string
 	sessionID     string
+	limits        resources.Profile
 	store         snapshot.Store
 	snapRec       *snapshot.Record
 	jailed        bool
@@ -328,9 +327,11 @@ func (i *firecrackerInstance) Execute(ctx context.Context, req ExecRequest) (Res
 		_ = conn.SetDeadline(deadline)
 	}
 	if err := guestproto.WriteRequest(conn, guestproto.Request{
-		Code:     req.Code,
-		Runtime:  i.language,
-		TimeoutS: int(req.Timeout / time.Second),
+		Code:        req.Code,
+		Runtime:     i.language,
+		TimeoutS:    int(req.Timeout / time.Second),
+		MemoryBytes: i.limits.MemoryBytes,
+		PIDsMax:     i.limits.PIDsMax,
 	}); err != nil {
 		return Result{}, err
 	}
@@ -543,6 +544,18 @@ func (f *Firecracker) placeRootfs(src, dst string) error {
 		return f.cfg.Pool.Acquire(dst)
 	}
 	return cloneFile(src, dst)
+}
+
+func (f *Firecracker) attachCgroup(inst *firecrackerInstance, spec Spec, pid int) error {
+	if f.cfg.Cgroup == nil {
+		return nil
+	}
+	cleanup, err := f.cfg.Cgroup.Attach(inst.id, pid, spec.Limits)
+	if err != nil {
+		return err
+	}
+	inst.cgroupCleanup = cleanup
+	return nil
 }
 
 func (f *Firecracker) spawnCmd(inst *firecrackerInstance, _ vmPaths) (*exec.Cmd, error) {

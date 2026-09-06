@@ -43,6 +43,11 @@ func CheckBindPolicy(addr string, p AuthPolicy) error {
 	return fmt.Errorf("%w: %s", ErrAnonymousPublic, addr)
 }
 
+// IsLoopbackAddr reports whether addr is only reachable from this host.
+func IsLoopbackAddr(addr string) bool {
+	return isLoopbackAddr(addr)
+}
+
 func isLoopbackAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

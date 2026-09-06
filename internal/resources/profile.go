@@ -90,16 +90,25 @@ func LoadSeccomp(path string) (SeccompProfile, error) {
 	if err := decodeJSONFile(path, &s); err != nil {
 		return SeccompProfile{}, err
 	}
-	if s.DefaultAction == "" {
-		return SeccompProfile{}, fmt.Errorf("seccomp profile %s: default_action is required", path)
-	}
-	if s.DefaultAction != "SCMP_ACT_ERRNO" && s.DefaultAction != "SCMP_ACT_KILL" && s.DefaultAction != "SCMP_ACT_KILL_PROCESS" {
-		return SeccompProfile{}, fmt.Errorf("seccomp profile %s: default_action %q is not fail-closed", path, s.DefaultAction)
-	}
-	if len(s.Syscalls) == 0 {
-		return SeccompProfile{}, fmt.Errorf("seccomp profile %s: at least one syscall rule is required", path)
+	if err := s.Validate(); err != nil {
+		return SeccompProfile{}, fmt.Errorf("seccomp profile %s: %w", path, err)
 	}
 	return s, nil
+}
+
+// Validate requires a fail-closed default. An allow-by-default profile is
+// rejected even if individual rules look strict.
+func (s SeccompProfile) Validate() error {
+	if s.DefaultAction == "" {
+		return fmt.Errorf("default_action is required")
+	}
+	if s.DefaultAction != "SCMP_ACT_ERRNO" && s.DefaultAction != "SCMP_ACT_KILL" && s.DefaultAction != "SCMP_ACT_KILL_PROCESS" {
+		return fmt.Errorf("default_action %q is not fail-closed", s.DefaultAction)
+	}
+	if len(s.Syscalls) == 0 {
+		return fmt.Errorf("at least one syscall rule is required")
+	}
+	return nil
 }
 
 func decodeJSONFile(path string, dest any) error {

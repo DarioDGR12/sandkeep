@@ -22,9 +22,11 @@ type CgroupV2 struct {
 	Log     *slog.Logger
 	Require bool
 	Root    string // default /sys/fs/cgroup
+	Self    string // default /proc/self/cgroup; override in tests
 }
 
-// Attach creates warden-<id> under the current cgroup and moves pid into it.
+// Attach creates warden-<id> under the current cgroup and moves pid (plus
+// descendants, so sudo+jailer children are included) into it.
 func (c CgroupV2) Attach(id string, pid int, profile Profile) (func() error, error) {
 	if err := profile.Validate(); err != nil {
 		return nil, err
@@ -33,7 +35,7 @@ func (c CgroupV2) Attach(id string, pid int, profile Profile) (func() error, err
 	if root == "" {
 		root = "/sys/fs/cgroup"
 	}
-	parent, err := currentCgroupDir(root)
+	parent, err := currentCgroupDir(root, c.Self)
 	if err != nil {
 		return c.missing("resolve current cgroup", err)
 	}
@@ -42,8 +44,9 @@ func (c CgroupV2) Attach(id string, pid int, profile Profile) (func() error, err
 		return c.missing("create "+dir, err)
 	}
 	cleanup := func() error {
-		// Move leftover tasks out so the directory can be removed.
-		_ = os.WriteFile(filepath.Join(parent, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o644)
+		for _, p := range append([]int{pid}, descendantPIDs(pid)...) {
+			_ = os.WriteFile(filepath.Join(parent, "cgroup.procs"), []byte(strconv.Itoa(p)), 0o644)
+		}
 		return os.Remove(dir)
 	}
 
@@ -60,12 +63,17 @@ func (c CgroupV2) Attach(id string, pid int, profile Profile) (func() error, err
 		_ = cleanup()
 		return c.missing("pids.max", err)
 	}
-	if err := writeCgroup(dir, "cgroup.procs", strconv.Itoa(pid)); err != nil {
+	// Optional controllers: missing files must not undo memory/cpu/pids.
+	_ = writeCgroup(dir, "memory.swap.max", "0")
+	_ = writeCgroup(dir, "memory.oom.group", "1")
+
+	pids := append([]int{pid}, descendantPIDs(pid)...)
+	if err := moveProcs(dir, pids); err != nil {
 		_ = cleanup()
 		return c.missing("cgroup.procs", err)
 	}
 	if c.Log != nil {
-		c.Log.Info("cgroup attached", "id", id, "pid", pid, "dir", dir, "memory_bytes", profile.MemoryBytes)
+		c.Log.Info("cgroup attached", "id", id, "pid", pid, "dir", dir, "memory_bytes", profile.MemoryBytes, "moved", len(pids))
 	}
 	return cleanup, nil
 }
@@ -85,8 +93,30 @@ func writeCgroup(dir, file, value string) error {
 	return os.WriteFile(filepath.Join(dir, file), []byte(value+"\n"), 0o644)
 }
 
-func currentCgroupDir(root string) (string, error) {
-	data, err := os.ReadFile("/proc/self/cgroup")
+func moveProcs(dir string, pids []int) error {
+	var last error
+	moved := 0
+	for _, pid := range pids {
+		if err := writeCgroup(dir, "cgroup.procs", strconv.Itoa(pid)); err != nil {
+			last = err
+			continue
+		}
+		moved++
+	}
+	if moved == 0 {
+		if last != nil {
+			return last
+		}
+		return fmt.Errorf("no processes to move")
+	}
+	return nil
+}
+
+func currentCgroupDir(root, self string) (string, error) {
+	if self == "" {
+		self = "/proc/self/cgroup"
+	}
+	data, err := os.ReadFile(self)
 	if err != nil {
 		return "", err
 	}
@@ -104,7 +134,59 @@ func currentCgroupDir(root string) (string, error) {
 			return filepath.Join(root, rel), nil
 		}
 	}
-	return "", fmt.Errorf("no cgroup v2 line in /proc/self/cgroup")
+	return "", fmt.Errorf("no cgroup v2 line in %s", self)
+}
+
+func descendantPIDs(rootPID int) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	ppid := make(map[int]int, 64)
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		parent, err := procPPid(pid)
+		if err != nil {
+			continue
+		}
+		ppid[pid] = parent
+	}
+	seen := map[int]bool{rootPID: true}
+	var out []int
+	changed := true
+	for changed {
+		changed = false
+		for pid, parent := range ppid {
+			if seen[pid] || !seen[parent] {
+				continue
+			}
+			seen[pid] = true
+			out = append(out, pid)
+			changed = true
+		}
+	}
+	return out
+}
+
+func procPPid(pid int) (int, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, err
+	}
+	// comm can contain spaces and parentheses: 123 (comm here) S ppid ...
+	s := string(data)
+	rparen := strings.LastIndex(s, ")")
+	if rparen < 0 || rparen+1 >= len(s) {
+		return 0, fmt.Errorf("parse /proc/%d/stat", pid)
+	}
+	fields := strings.Fields(s[rparen+1:])
+	if len(fields) < 2 {
+		return 0, fmt.Errorf("parse /proc/%d/stat fields", pid)
+	}
+	return strconv.Atoi(fields[1])
 }
 
 func sanitizeID(id string) string {

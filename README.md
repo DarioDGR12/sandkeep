@@ -14,6 +14,8 @@ Un agente que puede escribir y correr código sin aislamiento puede:
 - abrir conexiones de red no autorizadas (exfiltración)
 - agotar CPU, RAM o disco (DoS al nodo)
 
+**Más líneas de código no hacen un sandbox mejor.** Un `NoopLimiter` de 40 líneas no aísla nada. Una prueba que pasa con “cualquier error” es teatro. Warden solo crece cuando una capa **impone** un límite (cgroup que escribe `memory.max`, rlimit en el guest, nft drop, 401 antes de Boot) y un test **falla** si eso se puede saltar.
+
 Warden pone **cuatro barreras** (defensa en profundidad), no una sola:
 
 | Capa | Qué corta | Dónde vive |
@@ -23,7 +25,7 @@ Warden pone **cuatro barreras** (defensa en profundidad), no una sola:
 | seccomp | Syscalls peligrosas (fail-closed) | `internal/resources` + `configs/seccomp.json` |
 | Egress filter | Cualquier dial que no esté en allowlist | `internal/network` |
 
-cgroups y seccomp se aplican al **proceso jailer de Firecracker en el host**, no "dentro" del guest. El filtro de egress se aplica en el TAP/iptables del host. El guest no es un socio de confianza.
+cgroups se aplican al **proceso VMM/jailer en el host** (y a sus hijos). El guest-agent suma rlimits al python/node. `configs/seccomp.json` se valida fail-closed y **no** se inyecta al VMM (rompería KVM). El filtro de egress vive en nft del host. El guest no es un socio de confianza.
 
 ## Estructura
 
@@ -64,16 +66,16 @@ Si el stub corriera `python -c ...` en el proceso de Warden, el MVP sería el ag
 `configs/egress.json` tiene allowlist vacía y `default_policy: deny`. El loader **rechaza** `default_policy: allow`. El perfil seccomp exige `SCMP_ACT_ERRNO` o kill, nunca allow-by-default.
 
 **5. Cliente Firecracker propio, stdlib en el host.**
-El host habla HTTP sobre un Unix socket (como documenta Firecracker) y vsock con el handshake `CONNECT <port>\n` / `OK …`. La única dependencia extra es `golang.org/x/sys` para que el **guest-agent** haga `AF_VSOCK` dentro de la VM.
+El host habla HTTP sobre un Unix socket (como documenta Firecracker) y vsock con el handshake `CONNECT <port>\n` / `OK …`. Dependencias extra: `golang.org/x/sys` (guest-agent `AF_VSOCK` + rlimits) y `pgx` solo si hay audit en Postgres.
 
 **6. HTTP 200 = el sandbox terminó.**
 Exit code ≠ 0 y timeout de guest son resultados válidos para un agente (`exit_code`, `timed_out`). 4xx/5xx significa que **Warden** rechazó o no pudo arrancar el job.
 
 **7. Auditoría sin payload infinito.**
-Cada evento guarda `code_sha256`, tamaño, preview de 256 bytes, `session_id`, `vm_id`, timestamps y resultado. El disco local es efímero en PaaS (Render, etc.); el JSONL es un buffer, no la fuente de verdad a largo plazo.
+Cada evento guarda `code_sha256`, tamaño, preview de 256 bytes, `session_id`, `vm_id`, timestamps y resultado. JSONL local con fsync + slog; opcional HTTP y Postgres. En PaaS el disco es efímero: el sink remoto es la fuente de verdad.
 
 **8. Bind y auth.**
-Local (`go run` sin `PORT`): `127.0.0.1:8080`, sin API key. Cloud (`PORT` inyectado): `0.0.0.0:$PORT` y **exige** `WARDEN_API_KEY`. `/health` sigue público para el load balancer.
+Local (`go run` sin `PORT`): `127.0.0.1:8080`, sin API key. Cloud (`PORT` inyectado): `0.0.0.0:$PORT` y exige API key, JWT (JWKS) o mTLS. Bind público sin rate limit explícito usa 60 req/min por identidad. `/health` sigue público y sin cupo.
 
 ## API
 
@@ -120,7 +122,7 @@ Respuesta 200:
 
 El body HTTP está limitado a 1 MiB. Campos JSON desconocidos se rechazan.
 
-Auth: `X-Api-Key` o `Authorization: Bearer <key>`. Sin clave válida → 401 y no se arranca VM. Cola llena → 429 `busy`.
+Auth: `X-Api-Key` o `Authorization: Bearer <key|jwt>`. Sin credencial válida → 401 y no se arranca VM. Rate limit → 429 `rate_limited` (tampoco Boot). Cola de VMs llena → 429 `busy`.
 
 ## Cómo correrlo
 
@@ -145,7 +147,9 @@ Variables de entorno:
 | `WARDEN_AUDIT_DATABASE_URL` | unset | Postgres (`warden_audit`); fallback `DATABASE_URL` |
 | `WARDEN_AUDIT_STRICT` | unset | `1` → 500 si un sink falla |
 | `WARDEN_MAX_VMS` | `1` | VMs concurrentes; extra espera en cola |
-| `WARDEN_VM_QUEUE_WAIT` | `15s` | Timeout de la cola → 429 |
+| `WARDEN_VM_QUEUE_WAIT` | `15s` | Timeout de la cola → 429 `busy` |
+| `WARDEN_RATE_LIMIT` | `60` en bind público; off en loopback | Requests por ventana e identidad; `0` desactiva |
+| `WARDEN_RATE_WINDOW` | `1m` | Ventana del rate limit |
 | `WARDEN_ROOTFS_POOL` | `2` (firecracker) | Clones precalentados; `0` desactiva |
 | `WARDEN_RUNTIME` | `stub` | `stub` o `firecracker` |
 | `WARDEN_CONFIG_DIR` | `configs` | Perfiles + `firecracker.json` |
@@ -170,16 +174,17 @@ curl -s -X POST localhost:8080/execute \
 
 ```
 POST /execute
-  → auth (si hay API key; /health no)
+  → auth (si hay API key/JWT/mTLS; /health no)
+  → rate limit por identidad (token/CN/IP; /health no)
   → validar JSON y contrato
   → cola de VMs (Gate, max N)
-  → Limiter.Apply (validación de perfil)
+  → Limiter.Apply (valida perfil + seccomp; no toca el kernel)
   → Runtime.Boot
         Firecracker: restore snapshot si session_id tiene meta
-          o jailer (opt) → spawn VMM → cgroup al PID
+          o jailer (opt) → spawn VMM → cgroup al PID (también con jailer/sudo)
         → TAP+netns+veth+nft solo si allowlist no vacía
         → API configure → InstanceStart → wait guest-agent
-  → Instance.Execute (JSON por vsock; el guest exec python/node)
+  → Instance.Execute (JSON por vsock; guest-agent aplica rlimits y exec python/node)
   → snapshot best-effort (pause + PUT /snapshot/create) si hay session_id
   → defer Instance.Destroy (SendCtrlAltDel, SIGKILL, borrar workdir; el store de sesión se queda)
   → Audit.Record
@@ -202,7 +207,8 @@ Decisiones de fase 2 que importan:
 - **Sin TAP si allowlist vacía.** El guest no tiene L3. Si hay destinos: netns `warden-<id>`, TAP dentro del ns (`172.25.x.x/30`), veth uplink (`172.27.x.x/30`), NAT masquerade y nft **fail-closed en el veth del host** (forward policy drop; solo IPs resueltas de la allowlist). El jailer recibe `--netns`; sin jailer, Firecracker arranca con `ip netns exec`. El guest recibe IP por `ip=` en la cmdline del kernel.
 - **Jailer opcional.** `WARDEN_JAILER=assets/jailer` (y casi siempre `WARDEN_JAILER_SUDO=1`): chroot en `{work_dir}/firecracker/<id>/root`, drop a uid/gid no-root, `/dev/kvm` + `/dev/net/tun` dentro del jail. El VMM ve `/vmlinux`, `/rootfs.ext4`, `/api.sock`.
 - **seccomp del VMM ≠ seccomp del guest.** El jailer/Firecracker traen el filtro del VMM. `configs/seccomp.json` no se inyecta al proceso KVM.
-- **cgroups.** Sin jailer: attach best-effort al PID. Con jailer: `--cgroup-version 2` si `WARDEN_JAILER_CGROUP=1`.
+- **cgroups.** Tras spawn se mueve el PID del VMM **y sus hijos** (sudo+jailer) a un cgroup v2: `memory.max`, `cpu.max`, `pids.max`, `memory.swap.max=0`, `memory.oom.group=1`. `WARDEN_CGROUP_REQUIRED=1` falla cerrado si el cgroup no está delegado. El jailer puede sumar `--cgroup-version 2` con `WARDEN_JAILER_CGROUP=1`.
+- **rlimits en el guest.** El guest-agent aplica `RLIMIT_AS`, `RLIMIT_NPROC` y `RLIMIT_NOFILE` al python/node **después** de fork, antes de que el job corra. No sustituye al cgroup del host.
 - **Copia del rootfs:** pool de N clones precalentados (`data/vms/pool/`). Un miss clona en el momento. Nunca se devuelve un disco sucio al pool. `cp --reflink=auto` con fallback a copy. El kernel se hardlinkea. El store de sesión vive en `data/snapshots/` (nunca dentro del workdir de la VM).
 - **Snapshots.** Primera vez: `Full`. Siguientes: `Diff` (solo páginas sucias, `track_dirty_pages`) y rebase sparse sobre `vm.mem`. Restore: proceso fresco, logger, `PUT /snapshot/load` + `resume_vm` + dirty tracking. El TAP se recrea con los **mismos** nombres/IPs.
 - **KVM anidado.** En este Cloud Agent `KVM_CREATE_VCPU` hace oops. En un `.metal`: `WARDEN_ITEST=1 go test ./internal/runtime -run TestFirecrackerRealVM`.
@@ -221,8 +227,9 @@ go run ./cmd/warden
 ## Lo que esto NO es (aún)
 
 - Authorization Code / login interactivo (el JWT es machine-to-machine RS256)
-- Multi-tenant / quotas por cliente
+- Multi-tenant / billing; el rate limit es por identidad de auth, no por plan
 - Diff snapshots sin rebase (el restore siempre carga el mem ya fusionado)
+- Aplicar `configs/seccomp.json` al VMM (rompería KVM). Tampoco hay filtro seccomp dentro del guest todavía.
 
 ## Licencia
 

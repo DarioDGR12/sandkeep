@@ -211,13 +211,9 @@ func (f *Firecracker) launchRestore(ctx context.Context, spec Spec, inst *firecr
 	inst.stderr = stderr
 	go inst.reap()
 
-	if f.cfg.Cgroup != nil && f.cfg.Jailer == "" {
-		cleanup, err := f.cfg.Cgroup.Attach(inst.id, cmd.Process.Pid, spec.Limits)
-		if err != nil {
-			inst.kill()
-			return err
-		}
-		inst.cgroupCleanup = cleanup
+	if err := f.attachCgroup(inst, spec, cmd.Process.Pid); err != nil {
+		inst.kill()
+		return err
 	}
 
 	if err := waitForSocket(ctx, inst.apiSock, 5*time.Second); err != nil {

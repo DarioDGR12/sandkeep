@@ -53,3 +53,15 @@ func TestExecuteUnknownRuntime(t *testing.T) {
 		t.Fatalf("resp=%+v", resp)
 	}
 }
+
+func TestExecuteHonorsMemoryRlimit(t *testing.T) {
+	resp := execute(guestproto.Request{
+		Code:        "x = bytearray(80 * 1024 * 1024)",
+		Runtime:     "python",
+		TimeoutS:    5,
+		MemoryBytes: 32 << 20,
+	})
+	if resp.ExitCode == 0 && !resp.TimedOut {
+		t.Fatalf("allocation above RLIMIT_AS must fail: %+v", resp)
+	}
+}
