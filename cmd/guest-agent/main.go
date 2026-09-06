@@ -43,6 +43,9 @@ func run() error {
 		return err
 	}
 	defer ln.Close()
+	if err := applyGuestFence(); err != nil {
+		return fmt.Errorf("guest fence: %w", err)
+	}
 	log.Printf("guest-agent listening on %s", addr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -66,6 +69,8 @@ func run() error {
 	}
 }
 
+var jobSlots = make(chan struct{}, 1)
+
 func handle(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
@@ -75,6 +80,13 @@ func handle(conn net.Conn) {
 		log.Printf("read: %v", err)
 		return
 	}
+	select {
+	case jobSlots <- struct{}{}:
+		defer func() { <-jobSlots }()
+	default:
+		_ = guestproto.WriteResponse(conn, guestproto.Response{Stderr: "guest: busy", ExitCode: 1})
+		return
+	}
 	resp := execute(req)
 	if err := guestproto.WriteResponse(conn, resp); err != nil {
 		log.Printf("write: %v", err)
@@ -82,6 +94,9 @@ func handle(conn net.Conn) {
 }
 
 func execute(req guestproto.Request) guestproto.Response {
+	if len(req.Code) > guestproto.MaxCodeBytes {
+		return guestproto.Response{Stderr: "guest: code too large", ExitCode: 127}
+	}
 	timeout := time.Duration(req.TimeoutS) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Second

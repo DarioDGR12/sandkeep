@@ -34,10 +34,13 @@ func (i *firecrackerInstance) maybeSnapshot() {
 	snapCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := i.saveSnapshot(snapCtx); err != nil {
+		i.snapOK = false
 		if i.log != nil {
 			i.log.Warn("session snapshot failed", "session_id", i.sessionID, "vm_id", i.id, "err", err)
 		}
+		return
 	}
+	i.snapOK = true
 }
 
 func (i *firecrackerInstance) saveSnapshot(ctx context.Context) error {

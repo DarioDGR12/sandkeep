@@ -29,6 +29,7 @@ type Config struct {
 	MTLSSuffices    bool
 	RequireAll      bool
 	Rate            *FixedWindow
+	HealthMinimal   bool
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration

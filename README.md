@@ -145,7 +145,9 @@ Variables de entorno:
 | `WARDEN_ALLOW_ANON` | unset | `1` override (solo red de confianza) |
 | `WARDEN_AUDIT_URL` / `_TOKEN` | unset | POST JSON de cada evento |
 | `WARDEN_AUDIT_DATABASE_URL` | unset | Postgres (`warden_audit`); fallback `DATABASE_URL` |
-| `WARDEN_AUDIT_STRICT` | unset | `1` → 500 si un sink falla |
+| `WARDEN_AUDIT_STRICT` | unset | `1` → 500 si un sink falla (también en boots fallidos) |
+| `WARDEN_AUDIT_PREVIEW` | on | `0` omite el preview de código (sigue el hash) |
+| `WARDEN_HEALTH_MINIMAL` | unset | `1` oculta `backend` en `/health` |
 | `WARDEN_MAX_VMS` | `1` | VMs concurrentes; extra espera en cola |
 | `WARDEN_VM_QUEUE_WAIT` | `15s` | Timeout de la cola → 429 `busy` |
 | `WARDEN_RATE_LIMIT` | `60` en bind público; off en loopback | Requests por ventana e identidad; `0` desactiva |
@@ -155,12 +157,13 @@ Variables de entorno:
 | `WARDEN_CONFIG_DIR` | `configs` | Perfiles + `firecracker.json` |
 | `WARDEN_AUDIT_LOG` | `audit.jsonl` | Log JSONL |
 | `WARDEN_FC_BINARY` / `_KERNEL` / `_ROOTFS` | `assets/…` | Override de paths |
-| `WARDEN_CGROUP_REQUIRED` | unset | Si es `1`, Boot falla cuando no se puede crear el cgroup |
+| `WARDEN_CGROUP_REQUIRED` | `1` en bind público | `0`/`1` override; en loopback el default es best-effort |
+| `WARDEN_JAILER_NEWPID` | unset | `1` → jailer `--new-pid-ns` |
 | `WARDEN_JAILER` | unset | Path al binario jailer (vacío = Firecracker directo) |
 | `WARDEN_JAILER_SUDO` | unset | `1` para invocar el jailer con `sudo -n` |
 | `WARDEN_JAILER_UID` / `_GID` | usuario actual | Credenciales después del exec |
 | `WARDEN_NET_SUDO` | unset | `1` para `sudo -n` en `ip`/`nft` (también se activa si `WARDEN_JAILER_SUDO=1`) |
-| `WARDEN_SNAPSHOT_DIR` | `data/snapshots` | Store de sesión; vacío = no reusar VM |
+| `WARDEN_SNAPSHOT_DIR` | `data/snapshots` | Store de sesión; `off` / `0` / vacío desactiva |
 
 ```bash
 curl -s localhost:8080/health
@@ -184,14 +187,14 @@ POST /execute
           o jailer (opt) → spawn VMM → cgroup al PID (también con jailer/sudo)
         → TAP+netns+veth+nft solo si allowlist no vacía
         → API configure → InstanceStart → wait guest-agent
-  → Instance.Execute (JSON por vsock; guest-agent aplica rlimits y exec python/node)
-  → snapshot best-effort (pause + PUT /snapshot/create) si hay session_id
+  → Instance.Execute (JSON por vsock acotado; guest-agent: fence + rlimits + exec)
+  → snapshot (pause + PUT /snapshot/create); `snapshot_saved` en la respuesta 200
   → defer Instance.Destroy (SendCtrlAltDel, SIGKILL, borrar workdir; el store de sesión se queda)
   → Audit.Record
   → JSON al agente
 ```
 
-El timeout de `POST /execute` cubre **solo el job**. El boot de la VM tiene su propio presupuesto (20s).
+El timeout de `POST /execute` cubre **solo el job**. Si el boot (o la cola) se acaba, HTTP 504 `boot_timeout` — no es un timeout de guest.
 
 ### Levantar Firecracker de verdad
 
@@ -204,11 +207,11 @@ WARDEN_RUNTIME=firecracker go run ./cmd/warden
 
 Decisiones de fase 2 que importan:
 
-- **Sin TAP si allowlist vacía.** El guest no tiene L3. Si hay destinos: netns `warden-<id>`, TAP dentro del ns (`172.25.x.x/30`), veth uplink (`172.27.x.x/30`), NAT masquerade y nft **fail-closed en el veth del host** (forward policy drop; solo IPs resueltas de la allowlist). El jailer recibe `--netns`; sin jailer, Firecracker arranca con `ip netns exec`. El guest recibe IP por `ip=` en la cmdline del kernel.
+- **Sin TAP si allowlist vacía.** El guest no tiene L3. Si hay destinos: netns `warden-<id>`, TAP dentro del ns (`172.25.x.x/30`), veth uplink (`172.27.x.x/30`), NAT masquerade y nft **fail-closed en el veth del host**. `host:port` abre solo ese puerto (tcp+udp); un host sin puerto abre todos. `pypi.org:443` no implica `:80`.
 - **Jailer opcional.** `WARDEN_JAILER=assets/jailer` (y casi siempre `WARDEN_JAILER_SUDO=1`): chroot en `{work_dir}/firecracker/<id>/root`, drop a uid/gid no-root, `/dev/kvm` + `/dev/net/tun` dentro del jail. El VMM ve `/vmlinux`, `/rootfs.ext4`, `/api.sock`.
-- **seccomp del VMM ≠ seccomp del guest.** El jailer/Firecracker traen el filtro del VMM. `configs/seccomp.json` no se inyecta al proceso KVM.
-- **cgroups.** Tras spawn se mueve el PID del VMM **y sus hijos** (sudo+jailer) a un cgroup v2: `memory.max`, `cpu.max`, `pids.max`, `memory.swap.max=0`, `memory.oom.group=1`. `WARDEN_CGROUP_REQUIRED=1` falla cerrado si el cgroup no está delegado. El jailer puede sumar `--cgroup-version 2` con `WARDEN_JAILER_CGROUP=1`.
-- **rlimits en el guest.** El guest-agent aplica `RLIMIT_AS`, `RLIMIT_NPROC` y `RLIMIT_NOFILE` al python/node **después** de fork, antes de que el job corra. No sustituye al cgroup del host.
+- **seccomp del VMM ≠ seccomp del guest.** El jailer/Firecracker traen el filtro del VMM. `configs/seccomp.json` no se inyecta al proceso KVM. El guest-agent pone `PR_SET_NO_NEW_PRIVS` y un **denylist** (mount, ptrace, kexec, bpf, …) — no es un allowlist completo porque rompería python/node.
+- **cgroups.** Tras spawn se mueve el PID del VMM **y sus hijos**. En bind público el attach es fail-closed por defecto (`WARDEN_CGROUP_REQUIRED=0` lo relaja).
+- **rlimits + fence en el guest.** `RLIMIT_AS` / `NPROC` / `NOFILE`, un job a la vez, código máx. 64 KiB. El host rechaza respuestas vsock > ~2 MiB.
 - **Copia del rootfs:** pool de N clones precalentados (`data/vms/pool/`). Un miss clona en el momento. Nunca se devuelve un disco sucio al pool. `cp --reflink=auto` con fallback a copy. El kernel se hardlinkea. El store de sesión vive en `data/snapshots/` (nunca dentro del workdir de la VM).
 - **Snapshots.** Primera vez: `Full`. Siguientes: `Diff` (solo páginas sucias, `track_dirty_pages`) y rebase sparse sobre `vm.mem`. Restore: proceso fresco, logger, `PUT /snapshot/load` + `resume_vm` + dirty tracking. El TAP se recrea con los **mismos** nombres/IPs.
 - **KVM anidado.** En este Cloud Agent `KVM_CREATE_VCPU` hace oops. En un `.metal`: `WARDEN_ITEST=1 go test ./internal/runtime -run TestFirecrackerRealVM`.

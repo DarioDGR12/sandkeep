@@ -62,6 +62,7 @@ func TestTapSetupRecordsNetnsAndVeth(t *testing.T) {
 		"ip route add 172.25.0.0/30 via 172.27.0.2",
 		"nft -f -",
 		"151.101.0.223",
+		"tcp dport 443",
 		"1.2.3.4",
 		"ip netns exec warden-fc-1 sysctl -w net.ipv4.ip_forward=1",
 	} {
@@ -77,6 +78,9 @@ func TestTapSetupRecordsNetnsAndVeth(t *testing.T) {
 	}
 	if !strings.Contains(joined, `iifname "hfc1"`) {
 		t.Fatalf("nft must filter the uplink veth:\n%s", joined)
+	}
+	if strings.Contains(joined, "ip daddr { 151.101.0.223 }") {
+		t.Fatalf("pypi.org:443 must not open all ports:\n%s", joined)
 	}
 }
 
@@ -141,7 +145,7 @@ func TestTapRecreateUsesStoredNames(t *testing.T) {
 
 func TestRenderNFTFailClosed(t *testing.T) {
 	link := &network.Link{Name: "wfc1", Table: "warden_fc_1", GuestIP: net.ParseIP("172.25.0.2")}
-	script := network.RenderNFT(link, []net.IP{net.ParseIP("1.2.3.4")})
+	script := network.RenderNFT(link, []network.Dest{{IP: net.ParseIP("1.2.3.4")}})
 	for _, want := range []string{"policy drop", `iifname "wfc1"`, "1.2.3.4", "masquerade"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("missing %q in %s", want, script)
@@ -165,12 +169,29 @@ func TestRenderNFTUsesHostVeth(t *testing.T) {
 		Table:    "warden_fc_1",
 		GuestIP:  net.ParseIP("172.25.0.2"),
 	}
-	script := network.RenderNFT(link, []net.IP{net.ParseIP("9.9.9.9")})
+	script := network.RenderNFT(link, []network.Dest{{IP: net.ParseIP("9.9.9.9")}})
 	if !strings.Contains(script, `iifname "hfc1"`) {
 		t.Fatal(script)
 	}
 	if strings.Contains(script, `iifname "wfc1"`) {
 		t.Fatalf("must not filter the TAP when a veth exists: %s", script)
+	}
+}
+
+func TestRenderNFTPortSpecific(t *testing.T) {
+	link := &network.Link{Name: "wfc1", HostVeth: "hfc1", Table: "warden_fc_1", GuestIP: net.ParseIP("172.25.0.2")}
+	script := network.RenderNFT(link, []network.Dest{
+		{IP: net.ParseIP("151.101.0.223"), Port: 443},
+		{IP: net.ParseIP("1.2.3.4")},
+	})
+	if !strings.Contains(script, "tcp dport 443") || !strings.Contains(script, "udp dport 443") {
+		t.Fatalf("missing port rules: %s", script)
+	}
+	if !strings.Contains(script, "ip daddr { 1.2.3.4 }") {
+		t.Fatalf("host-only entry must allow any port: %s", script)
+	}
+	if strings.Contains(script, "ip daddr { 151.101.0.223 }") {
+		t.Fatalf("ported dest must not be in the any-port set: %s", script)
 	}
 }
 

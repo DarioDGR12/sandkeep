@@ -89,24 +89,29 @@ func (f *StaticFilter) Policy() Policy {
 	return cp
 }
 
-// Allows reports whether a guest dial to hostport (host, host:port, or CIDR-ish
-// host) is permitted. Matching is exact host or host:port against the allowlist.
+// Allows reports whether a guest dial to hostport is permitted.
+// A host-only allowlist entry matches any port. A host:port entry
+// matches only that port (pypi.org:443 does not allow :80).
 func (f *StaticFilter) Allows(hostport string) bool {
 	hostport = strings.TrimSpace(strings.ToLower(hostport))
 	if hostport == "" {
 		return false
 	}
-	host, _, err := net.SplitHostPort(hostport)
+	host, port, err := net.SplitHostPort(hostport)
 	if err != nil {
 		host = hostport
+		port = ""
 	}
 	for _, raw := range f.policy.Allowlist {
 		entry := strings.TrimSpace(strings.ToLower(raw))
-		if entry == hostport || entry == host {
-			return true
+		eHost, ePort, eerr := net.SplitHostPort(entry)
+		if eerr != nil {
+			if entry == host || entry == hostport {
+				return true
+			}
+			continue
 		}
-		entryHost, _, err := net.SplitHostPort(entry)
-		if err == nil && (entryHost == host || entry == hostport) {
+		if eHost == host && ePort == port {
 			return true
 		}
 	}

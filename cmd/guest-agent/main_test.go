@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,6 +51,17 @@ func TestExecutePythonOnHostAgent(t *testing.T) {
 func TestExecuteUnknownRuntime(t *testing.T) {
 	resp := execute(guestproto.Request{Code: "x", Runtime: "ruby", TimeoutS: 1})
 	if resp.ExitCode != 127 {
+		t.Fatalf("resp=%+v", resp)
+	}
+}
+
+func TestExecuteRejectsHugeCode(t *testing.T) {
+	resp := execute(guestproto.Request{
+		Code:     strings.Repeat("x", guestproto.MaxCodeBytes+1),
+		Runtime:  "python",
+		TimeoutS: 1,
+	})
+	if resp.ExitCode != 127 || !strings.Contains(resp.Stderr, "too large") {
 		t.Fatalf("resp=%+v", resp)
 	}
 }

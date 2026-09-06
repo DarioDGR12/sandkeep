@@ -25,6 +25,14 @@ func TestSummarizeCodeTruncatesPreview(t *testing.T) {
 	}
 }
 
+func TestSummarizeCodePreviewCanBeDisabled(t *testing.T) {
+	t.Setenv("WARDEN_AUDIT_PREVIEW", "0")
+	_, _, preview := audit.SummarizeCode("SECRET=super-secret")
+	if preview != "" {
+		t.Fatalf("preview=%q", preview)
+	}
+}
+
 func TestJSONLLoggerAppends(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	l := audit.NewJSONLLogger(path)

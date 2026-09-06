@@ -78,3 +78,14 @@ func TestLoadConfigEnvOverlay(t *testing.T) {
 		t.Fatalf("pool=%d", cfg.RootfsPoolSize)
 	}
 }
+
+func TestLoadConfigSnapshotDirOff(t *testing.T) {
+	t.Setenv("WARDEN_SNAPSHOT_DIR", "off")
+	cfg, err := runtime.LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SnapshotDir != "" {
+		t.Fatalf("off must disable snapshots, got %q", cfg.SnapshotDir)
+	}
+}

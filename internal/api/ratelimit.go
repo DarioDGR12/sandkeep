@@ -61,17 +61,32 @@ func (r *FixedWindow) Allow(key string) bool {
 		return false
 	}
 	c.n++
-	if len(r.hits) > 4096 {
-		r.evictLocked(now)
+	const maxKeys = 2048
+	if len(r.hits) > maxKeys {
+		r.evictLocked(now, maxKeys)
 	}
 	return true
 }
 
-func (r *FixedWindow) evictLocked(now time.Time) {
+func (r *FixedWindow) evictLocked(now time.Time, maxKeys int) {
 	for k, c := range r.hits {
 		if !now.Before(c.reset) {
 			delete(r.hits, k)
 		}
+	}
+	for len(r.hits) > maxKeys {
+		var oldest string
+		var oldestReset time.Time
+		first := true
+		for k, c := range r.hits {
+			if first || c.reset.Before(oldestReset) {
+				oldest, oldestReset, first = k, c.reset, false
+			}
+		}
+		if oldest == "" {
+			return
+		}
+		delete(r.hits, oldest)
 	}
 }
 

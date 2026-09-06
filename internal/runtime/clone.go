@@ -10,6 +10,13 @@ import (
 // cloneFile makes a private copy of src at dst. It prefers cp --reflink=auto
 // (cheap on btrfs/xfs/overlay) and falls back to a full userspace copy.
 func cloneFile(src, dst string) error {
+	st, err := os.Lstat(src)
+	if err != nil {
+		return fmt.Errorf("clone %s: %w", src, err)
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("clone %s: not a regular file", src)
+	}
 	cmd := exec.Command("cp", "--reflink=auto", "--sparse=auto", src, dst)
 	if err := cmd.Run(); err == nil {
 		return nil

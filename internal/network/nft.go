@@ -6,17 +6,37 @@ import (
 	"strings"
 )
 
+// Dest is one allowlisted destination. Port 0 means any port on IP.
+type Dest struct {
+	IP   net.IP
+	Port int
+}
+
 // RenderNFT builds a fail-closed inet table on the host-visible iface
 // (the uplink veth when the TAP lives in a netns). Only forwarded packets
 // to the allowlisted destinations (plus established replies) pass.
-func RenderNFT(link *Link, allow []net.IP) string {
+// Entries with a port require tcp/udp dport; entries without a port allow
+// all ports to that IP (host-only allowlist).
+func RenderNFT(link *Link, allow []Dest) string {
 	dev := link.FilterIface()
-	var v4, v6 []string
-	for _, ip := range allow {
-		if ip.To4() != nil {
-			v4 = append(v4, ip.String())
+	var any4, any6 []string
+	var port4, port6 []Dest
+	for _, d := range allow {
+		if d.IP == nil {
+			continue
+		}
+		if d.Port > 0 {
+			if d.IP.To4() != nil {
+				port4 = append(port4, d)
+			} else {
+				port6 = append(port6, d)
+			}
+			continue
+		}
+		if d.IP.To4() != nil {
+			any4 = append(any4, d.IP.String())
 		} else {
-			v6 = append(v6, ip.String())
+			any6 = append(any6, d.IP.String())
 		}
 	}
 	var b strings.Builder
@@ -25,11 +45,19 @@ func RenderNFT(link *Link, allow []net.IP) string {
 	b.WriteString("    type filter hook forward priority 0; policy drop;\n")
 	fmt.Fprintf(&b, "    iifname %q ct state established,related accept\n", dev)
 	fmt.Fprintf(&b, "    oifname %q ct state established,related accept\n", dev)
-	if len(v4) > 0 {
-		fmt.Fprintf(&b, "    iifname %q ip daddr { %s } accept\n", dev, strings.Join(v4, ", "))
+	if len(any4) > 0 {
+		fmt.Fprintf(&b, "    iifname %q ip daddr { %s } accept\n", dev, strings.Join(any4, ", "))
 	}
-	if len(v6) > 0 {
-		fmt.Fprintf(&b, "    iifname %q ip6 daddr { %s } accept\n", dev, strings.Join(v6, ", "))
+	if len(any6) > 0 {
+		fmt.Fprintf(&b, "    iifname %q ip6 daddr { %s } accept\n", dev, strings.Join(any6, ", "))
+	}
+	for _, d := range port4 {
+		fmt.Fprintf(&b, "    iifname %q ip daddr %s tcp dport %d accept\n", dev, d.IP.String(), d.Port)
+		fmt.Fprintf(&b, "    iifname %q ip daddr %s udp dport %d accept\n", dev, d.IP.String(), d.Port)
+	}
+	for _, d := range port6 {
+		fmt.Fprintf(&b, "    iifname %q ip6 daddr %s tcp dport %d accept\n", dev, d.IP.String(), d.Port)
+		fmt.Fprintf(&b, "    iifname %q ip6 daddr %s udp dport %d accept\n", dev, d.IP.String(), d.Port)
 	}
 	b.WriteString("  }\n")
 	b.WriteString("  chain postrouting {\n")

@@ -18,6 +18,17 @@ const DefaultPort = 52
 // MaxOutputBytes caps stdout+stderr the agent will return.
 const MaxOutputBytes = 1 << 20
 
+// MaxCodeBytes matches the HTTP API cap so a compromised vsock peer
+// cannot send an unbounded source payload to the guest-agent.
+const MaxCodeBytes = 64 << 10
+
+// MaxRequestBytes caps the JSON request the guest-agent will decode.
+const MaxRequestBytes = MaxCodeBytes + 8<<10
+
+// MaxResponseBytes caps the JSON response the host will decode.
+// Two MaxOutputBytes buffers plus JSON framing.
+const MaxResponseBytes = 2*MaxOutputBytes + 8<<10
+
 // Request is what the host sends after the vsock CONNECT handshake.
 type Request struct {
 	Code        string `json:"code"`
@@ -45,11 +56,7 @@ func WriteRequest(w io.Writer, req Request) error {
 
 // ReadRequest decodes one request value (newlines inside code are fine).
 func ReadRequest(r io.Reader) (Request, error) {
-	var req Request
-	if err := json.NewDecoder(r).Decode(&req); err != nil {
-		return Request{}, fmt.Errorf("guestproto read request: %w", err)
-	}
-	return req, nil
+	return readJSON[Request](r, MaxRequestBytes)
 }
 
 // WriteResponse encodes one response.
@@ -60,11 +67,20 @@ func WriteResponse(w io.Writer, resp Response) error {
 	return nil
 }
 
-// ReadResponse decodes one response value.
+// ReadResponse decodes one response value with a hard size cap so a
+// compromised guest cannot OOM the Warden host.
 func ReadResponse(r io.Reader) (Response, error) {
-	var resp Response
-	if err := json.NewDecoder(r).Decode(&resp); err != nil {
-		return Response{}, fmt.Errorf("guestproto read response: %w", err)
+	return readJSON[Response](r, MaxResponseBytes)
+}
+
+func readJSON[T any](r io.Reader, max int64) (T, error) {
+	var v T
+	limited := &io.LimitedReader{R: r, N: max + 1}
+	if err := json.NewDecoder(limited).Decode(&v); err != nil {
+		return v, fmt.Errorf("guestproto decode: %w", err)
 	}
-	return resp, nil
+	if limited.N == 0 {
+		return v, fmt.Errorf("guestproto: message exceeds %d bytes", max)
+	}
+	return v, nil
 }

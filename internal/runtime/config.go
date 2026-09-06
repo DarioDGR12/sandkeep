@@ -127,8 +127,13 @@ func overlayEnv(cfg *Config) {
 	if os.Getenv("WARDEN_JAILER_NEWPID") == "1" {
 		cfg.NewPIDNS = true
 	}
-	if v := os.Getenv("WARDEN_SNAPSHOT_DIR"); v != "" {
-		cfg.SnapshotDir = v
+	if v, ok := os.LookupEnv("WARDEN_SNAPSHOT_DIR"); ok {
+		if v == "" || v == "off" || v == "0" {
+			cfg.SnapshotDir = ""
+			cfg.Snapshots = nil
+		} else {
+			cfg.SnapshotDir = v
+		}
 	}
 	if v := os.Getenv("WARDEN_ROOTFS_POOL"); v != "" {
 		fmt.Sscanf(v, "%d", &cfg.RootfsPoolSize)

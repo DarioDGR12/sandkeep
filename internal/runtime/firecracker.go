@@ -307,6 +307,7 @@ type firecrackerInstance struct {
 	waitOnce      sync.Once
 	waitErr       error
 	exited        chan struct{}
+	snapOK        bool
 }
 
 func (i *firecrackerInstance) ID() string { return i.id }
@@ -350,6 +351,7 @@ func (i *firecrackerInstance) Execute(ctx context.Context, req ExecRequest) (Res
 		TimedOut: resp.TimedOut,
 	}
 	i.maybeSnapshot()
+	res.SnapshotSaved = i.snapOK
 	return res, nil
 }
 

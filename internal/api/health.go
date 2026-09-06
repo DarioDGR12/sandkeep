@@ -4,7 +4,7 @@ import "net/http"
 
 type healthResponse struct {
 	Status  string `json:"status"`
-	Backend string `json:"backend"`
+	Backend string `json:"backend,omitempty"`
 	Ready   bool   `json:"ready"`
 }
 
@@ -24,6 +24,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status := "ok"
 	if !ready {
 		status = "degraded"
+	}
+	if s.cfg.HealthMinimal {
+		writeJSON(w, http.StatusOK, healthResponse{Status: status, Ready: ready})
+		return
 	}
 	writeJSON(w, http.StatusOK, healthResponse{
 		Status:  status,

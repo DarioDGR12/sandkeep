@@ -53,6 +53,10 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	durationMS := time.Since(started).Milliseconds()
 
 	auditErr := s.recordAudit(r.Context(), req, requestID, res, durationMS, execErr)
+	if auditErr != nil && s.deps.AuditStrict {
+		writeError(w, requestID, http.StatusInternalServerError, CodeAuditFailed, "audit sink failed")
+		return
+	}
 
 	if execErr != nil {
 		s.deps.Log.Error("execute failed",
@@ -62,10 +66,6 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 		)
 		status, code, msg := mapExecError(execErr)
 		writeError(w, requestID, status, code, msg)
-		return
-	}
-	if auditErr != nil && s.deps.AuditStrict {
-		writeError(w, requestID, http.StatusInternalServerError, CodeAuditFailed, "audit sink failed")
 		return
 	}
 
@@ -98,6 +98,9 @@ func (s *Server) run(ctx context.Context, req ExecuteRequest) (runtime.Result, e
 
 	inst, err := s.deps.Runtime.Boot(bootCtx, spec)
 	if err != nil {
+		if bootCtx.Err() != nil {
+			return runtime.Result{}, fmt.Errorf("%w: %v", runtime.ErrBootTimeout, err)
+		}
 		return runtime.Result{}, err
 	}
 	// Destroy must run even if Execute times out or panics.
@@ -162,6 +165,9 @@ func mapExecError(err error) (status int, code, msg string) {
 	}
 	if errors.Is(err, runtime.ErrBusy) {
 		return http.StatusTooManyRequests, CodeBusy, "too many concurrent VMs"
+	}
+	if errors.Is(err, runtime.ErrBootTimeout) {
+		return http.StatusGatewayTimeout, CodeBootTimeout, "VM boot timed out"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return http.StatusGatewayTimeout, CodeInternal, "execution timed out before a VM result"

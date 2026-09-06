@@ -71,7 +71,7 @@ func run() error {
 		}
 		fcCfg.Cgroup = resources.CgroupV2{
 			Log:     log,
-			Require: os.Getenv("WARDEN_CGROUP_REQUIRED") == "1",
+			Require: cgroupRequired(listen),
 		}
 		tap := network.NewTAP(log)
 		if os.Getenv("WARDEN_NET_SUDO") == "1" || os.Getenv("WARDEN_JAILER_SUDO") == "1" {
@@ -147,6 +147,7 @@ func run() error {
 	httpCfg.RequireAll = os.Getenv("WARDEN_AUTH_REQUIRE_ALL") == "1"
 	httpCfg.MTLSSuffices = !httpCfg.RequireAll
 	httpCfg.Rate = buildRateLimit(listen)
+	httpCfg.HealthMinimal = os.Getenv("WARDEN_HEALTH_MINIMAL") == "1"
 	cgroupLimiter := resources.ProfileLimiter{Log: log}
 	srv := api.NewServer(httpCfg, api.Dependencies{
 		Runtime:     rt,
@@ -209,6 +210,17 @@ func run() error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutCtx)
+}
+
+func cgroupRequired(listen string) bool {
+	switch os.Getenv("WARDEN_CGROUP_REQUIRED") {
+	case "1":
+		return true
+	case "0":
+		return false
+	default:
+		return !api.IsLoopbackAddr(listen)
+	}
 }
 
 func buildRateLimit(listen string) *api.FixedWindow {

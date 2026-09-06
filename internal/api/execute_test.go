@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DarioDGR12/sandkeep/internal/api"
 	"github.com/DarioDGR12/sandkeep/internal/audit"
@@ -37,7 +38,7 @@ func testServer(t *testing.T, rt runtime.Runtime, log audit.Logger) http.Handler
 	}
 	srv := api.NewServer(api.DefaultConfig("127.0.0.1:0"), api.Dependencies{
 		Runtime: rt,
-		Limiter: resources.NoopLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Limiter: resources.ProfileLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		Limits:  resources.DefaultProfile(),
 		Seccomp: seccomp,
 		Network: filter,
@@ -170,10 +171,13 @@ func TestExecuteAuditStrictIs500(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := api.NewServer(api.DefaultConfig("127.0.0.1:0"), api.Dependencies{
-		Runtime:     runtime.NewStub(),
-		Limiter:     resources.NoopLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
-		Limits:      resources.DefaultProfile(),
-		Seccomp:     resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO"},
+		Runtime: runtime.NewStub(),
+		Limiter: resources.ProfileLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Limits:  resources.DefaultProfile(),
+		Seccomp: resources.SeccompProfile{
+			DefaultAction: "SCMP_ACT_ERRNO",
+			Syscalls:      []resources.SeccompSyscall{{Action: "SCMP_ACT_ALLOW", Names: []string{"read"}}},
+		},
 		Network:     filter,
 		Audit:       failAudit{},
 		AuditStrict: true,
@@ -241,6 +245,34 @@ func TestHealth(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"status":"ok"`) {
 		t.Fatalf("body=%s", rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"backend"`) {
+		t.Fatalf("default health should include backend: %s", rec.Body.String())
+	}
+}
+
+func TestHealthMinimalHidesBackend(t *testing.T) {
+	filter, err := network.NewStaticFilter(network.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := api.DefaultConfig("127.0.0.1:0")
+	cfg.HealthMinimal = true
+	srv := api.NewServer(cfg, api.Dependencies{
+		Runtime: runtime.NewStub(),
+		Limiter: resources.ProfileLimiter{},
+		Limits:  resources.DefaultProfile(),
+		Seccomp: resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO", Syscalls: []resources.SeccompSyscall{{Action: "SCMP_ACT_ALLOW", Names: []string{"read"}}}},
+		Network: filter,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), `"backend"`) {
+		t.Fatalf("minimal health leaked backend: %s", rec.Body.String())
+	}
 }
 
 func TestPython3Alias(t *testing.T) {
@@ -269,5 +301,91 @@ func TestDefaultTimeoutAccepted(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExecuteOpenSeccompRejected(t *testing.T) {
+	filter, err := network.NewStaticFilter(network.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := api.NewServer(api.DefaultConfig("127.0.0.1:0"), api.Dependencies{
+		Runtime: runtime.NewStub(),
+		Limiter: resources.ProfileLimiter{},
+		Limits:  resources.DefaultProfile(),
+		Seccomp: resources.SeccompProfile{
+			DefaultAction: "SCMP_ACT_ALLOW",
+			Syscalls:      []resources.SeccompSyscall{{Action: "SCMP_ACT_ALLOW", Names: []string{"read"}}},
+		},
+		Network: filter,
+		Audit:   &audit.MemoryLogger{},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExecuteAuditStrictOnFailedBoot(t *testing.T) {
+	filter, err := network.NewStaticFilter(network.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := api.NewServer(api.DefaultConfig("127.0.0.1:0"), api.Dependencies{
+		Runtime:     busyRuntime{},
+		Limiter:     resources.ProfileLimiter{},
+		Limits:      resources.DefaultProfile(),
+		Seccomp:     resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO", Syscalls: []resources.SeccompSyscall{{Action: "SCMP_ACT_ALLOW", Names: []string{"read"}}}},
+		Network:     filter,
+		Audit:       failAudit{},
+		AuditStrict: true,
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), api.CodeAuditFailed) {
+		t.Fatalf("strict audit on failed boot must win: %s", rec.Body.String())
+	}
+}
+
+type hangBoot struct{}
+
+func (hangBoot) Name() string { return "hang" }
+
+func (hangBoot) Boot(ctx context.Context, spec runtime.Spec) (runtime.Instance, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestExecuteBootTimeout(t *testing.T) {
+	filter, err := network.NewStaticFilter(network.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := api.NewServer(api.DefaultConfig("127.0.0.1:0"), api.Dependencies{
+		Runtime:     hangBoot{},
+		Limiter:     resources.ProfileLimiter{},
+		Limits:      resources.DefaultProfile(),
+		Seccomp:     resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO", Syscalls: []resources.SeccompSyscall{{Action: "SCMP_ACT_ALLOW", Names: []string{"read"}}}},
+		Network:     filter,
+		Audit:       &audit.MemoryLogger{},
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		BootTimeout: 20 * time.Millisecond,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), api.CodeBootTimeout) {
+		t.Fatalf("body=%s", rec.Body.String())
 	}
 }
