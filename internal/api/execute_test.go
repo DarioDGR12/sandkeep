@@ -364,6 +364,69 @@ func (hangBoot) Boot(ctx context.Context, spec runtime.Spec) (runtime.Instance, 
 	return nil, ctx.Err()
 }
 
+type savedSnapRuntime struct{}
+
+func (savedSnapRuntime) Name() string { return "snap" }
+
+func (savedSnapRuntime) Boot(_ context.Context, spec runtime.Spec) (runtime.Instance, error) {
+	return savedSnapInst{}, nil
+}
+
+type savedSnapInst struct{}
+
+func (savedSnapInst) ID() string { return "fc-snap" }
+
+func (savedSnapInst) Execute(context.Context, runtime.ExecRequest) (runtime.Result, error) {
+	return runtime.Result{VMID: "fc-snap", SnapshotSaved: true}, nil
+}
+
+func (savedSnapInst) Destroy(context.Context) error { return nil }
+
+func TestExecuteSnapshotSaved(t *testing.T) {
+	h := testServer(t, savedSnapRuntime{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"snapshot_saved":true`) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
+type hangExec struct{}
+
+func (hangExec) Name() string { return "hang-exec" }
+
+func (hangExec) Boot(_ context.Context, spec runtime.Spec) (runtime.Instance, error) {
+	return hangExecInst{}, nil
+}
+
+type hangExecInst struct{}
+
+func (hangExecInst) ID() string { return "hang" }
+
+func (hangExecInst) Execute(ctx context.Context, _ runtime.ExecRequest) (runtime.Result, error) {
+	<-ctx.Done()
+	return runtime.Result{}, ctx.Err()
+}
+
+func (hangExecInst) Destroy(context.Context) error { return nil }
+
+func TestExecuteHostDeadlineIsExecTimeout(t *testing.T) {
+	h := testServer(t, hangExec{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/execute", strings.NewReader(`{"code":"x","runtime":"python","timeout":1}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), api.CodeExecTimeout) {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
 func TestExecuteBootTimeout(t *testing.T) {
 	filter, err := network.NewStaticFilter(network.Default())
 	if err != nil {

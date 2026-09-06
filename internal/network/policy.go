@@ -7,10 +7,13 @@
 package network
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -32,6 +35,18 @@ type Filter interface {
 // StaticFilter is an immutable policy loaded at process start.
 type StaticFilter struct {
 	policy Policy
+}
+
+// Fingerprint is a stable hash of the allowlist. Used so a session snapshot
+// is not restored after the egress policy changes.
+func (p Policy) Fingerprint() string {
+	entries := append([]string(nil), p.Allowlist...)
+	for i := range entries {
+		entries[i] = strings.TrimSpace(strings.ToLower(entries[i]))
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // Default returns a deny-all policy with an empty allowlist.

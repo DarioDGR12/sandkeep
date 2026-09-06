@@ -69,9 +69,12 @@ func authServer(t *testing.T, key string, rt runtime.Runtime) http.Handler {
 	cfg.APIKey = key
 	srv := api.NewServer(cfg, api.Dependencies{
 		Runtime: rt,
-		Limiter: resources.NoopLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Limiter: resources.ProfileLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		Limits:  resources.DefaultProfile(),
-		Seccomp: resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO"},
+		Seccomp: resources.SeccompProfile{
+			DefaultAction: "SCMP_ACT_ERRNO",
+			Syscalls:      []resources.SeccompSyscall{{Action: "SCMP_ACT_ALLOW", Names: []string{"read"}}},
+		},
 		Network: filter,
 		Audit:   &audit.MemoryLogger{},
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -168,9 +171,12 @@ func TestExecuteAcceptsJWT(t *testing.T) {
 	}
 	srv := api.NewServer(cfg, api.Dependencies{
 		Runtime: runtime.NewStub(),
-		Limiter: resources.NoopLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		Limiter: resources.ProfileLimiter{Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		Limits:  resources.DefaultProfile(),
-		Seccomp: resources.SeccompProfile{DefaultAction: "SCMP_ACT_ERRNO"},
+		Seccomp: resources.SeccompProfile{
+			DefaultAction: "SCMP_ACT_ERRNO",
+			Syscalls:      []resources.SeccompSyscall{{Action: "SCMP_ACT_ALLOW", Names: []string{"read"}}},
+		},
 		Network: filter,
 		Audit:   &audit.MemoryLogger{},
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),

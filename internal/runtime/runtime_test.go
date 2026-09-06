@@ -72,7 +72,7 @@ func TestNewFactory(t *testing.T) {
 		t.Fatalf("fc: rt=%v err=%v", rt, err)
 	}
 	_, err = rt.Boot(context.Background(), runtime.Spec{Language: "python", Limits: resources.DefaultProfile()})
-	if !errors.Is(err, runtime.ErrMissingAssets) && !errors.Is(err, runtime.ErrNotImplemented) {
+	if !errors.Is(err, runtime.ErrMissingAssets) {
 		t.Fatalf("want ErrMissingAssets, got %v", err)
 	}
 	if _, err := runtime.New("gvisor"); err == nil {

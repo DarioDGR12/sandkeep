@@ -99,20 +99,15 @@ func writeCgroup(dir, file, value string) error {
 }
 
 func moveProcs(dir string, pids []int) error {
-	var last error
-	moved := 0
-	for _, pid := range pids {
-		if err := writeCgroup(dir, "cgroup.procs", strconv.Itoa(pid)); err != nil {
-			last = err
-			continue
-		}
-		moved++
-	}
-	if moved == 0 {
-		if last != nil {
-			return last
-		}
+	if len(pids) == 0 {
 		return fmt.Errorf("no processes to move")
+	}
+	// The root VMM/jailer pid must move. Descendants are best-effort.
+	if err := writeCgroup(dir, "cgroup.procs", strconv.Itoa(pids[0])); err != nil {
+		return err
+	}
+	for _, pid := range pids[1:] {
+		_ = writeCgroup(dir, "cgroup.procs", strconv.Itoa(pid))
 	}
 	return nil
 }

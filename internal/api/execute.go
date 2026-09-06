@@ -98,7 +98,7 @@ func (s *Server) run(ctx context.Context, req ExecuteRequest) (runtime.Result, e
 
 	inst, err := s.deps.Runtime.Boot(bootCtx, spec)
 	if err != nil {
-		if bootCtx.Err() != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
 			return runtime.Result{}, fmt.Errorf("%w: %v", runtime.ErrBootTimeout, err)
 		}
 		return runtime.Result{}, err
@@ -170,7 +170,7 @@ func mapExecError(err error) (status int, code, msg string) {
 		return http.StatusGatewayTimeout, CodeBootTimeout, "VM boot timed out"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return http.StatusGatewayTimeout, CodeInternal, "execution timed out before a VM result"
+		return http.StatusGatewayTimeout, CodeExecTimeout, "execution timed out before a VM result"
 	}
 	return http.StatusInternalServerError, CodeInternal, "failed to execute in sandbox"
 }

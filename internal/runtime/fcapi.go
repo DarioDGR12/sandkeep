@@ -136,6 +136,10 @@ func (c *fcClient) pauseVM(ctx context.Context) error {
 	return c.patch(ctx, "/vm", fcVMState{State: "Paused"})
 }
 
+func (c *fcClient) resumeVM(ctx context.Context) error {
+	return c.patch(ctx, "/vm", fcVMState{State: "Resumed"})
+}
+
 func (c *fcClient) createSnapshot(ctx context.Context, kind, snapPath, memPath string) error {
 	if kind == "" {
 		kind = "Full"

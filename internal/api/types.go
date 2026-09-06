@@ -47,6 +47,7 @@ const (
 	CodeBusy           = "busy"
 	CodeRateLimited    = "rate_limited"
 	CodeBootTimeout    = "boot_timeout"
+	CodeExecTimeout    = "exec_timeout"
 	CodeAuditFailed    = "audit_failed"
 )
 

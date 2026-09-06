@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func TestJailerCredsRejectsUID0(t *testing.T) {
+	if _, _, err := jailerCreds(Config{JailerUID: 0, JailerGID: 10}); err == nil {
+		t.Fatal("explicit uid 0 must be rejected")
+	}
+	uid, gid, err := jailerCreds(Config{JailerUID: 123, JailerGID: 123})
+	if err != nil || uid != 123 || gid != 123 {
+		t.Fatalf("uid=%d gid=%d err=%v", uid, gid, err)
+	}
+}
+
 func TestValidateJailerID(t *testing.T) {
 	if err := validateJailerID("fc-1"); err != nil {
 		t.Fatal(err)

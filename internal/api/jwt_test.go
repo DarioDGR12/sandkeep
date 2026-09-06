@@ -66,6 +66,33 @@ func TestJWTVerifierRS256(t *testing.T) {
 	if v.Valid("not-a-jwt") {
 		t.Fatal("opaque token accepted")
 	}
+	wrongAud := signJWT(t, key, "k1", map[string]any{
+		"iss": "https://issuer.test",
+		"aud": "other",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	if v.Valid(wrongAud) {
+		t.Fatal("wrong audience accepted")
+	}
+	noIss := &api.JWTVerifier{JWKSURL: jwks.URL, Audience: "warden", Client: jwks.Client()}
+	if noIss.Valid(good) {
+		t.Fatal("empty issuer must reject every token")
+	}
+}
+
+func TestCheckJWTConfig(t *testing.T) {
+	if err := api.CheckJWTConfig("", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.CheckJWTConfig("https://issuer.test/jwks", "", "warden"); err == nil {
+		t.Fatal("JWKS without issuer must fail")
+	}
+	if err := api.CheckJWTConfig("http://evil.example/jwks", "iss", "warden"); err == nil {
+		t.Fatal("non-loopback HTTP JWKS must fail")
+	}
+	if err := api.CheckJWTConfig("https://issuer.test/jwks", "iss", "warden"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func signJWT(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any) string {

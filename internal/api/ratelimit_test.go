@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +28,19 @@ func TestFixedWindowPerKey(t *testing.T) {
 	}
 }
 
+func TestFixedWindowDoesNotEvictActiveKeys(t *testing.T) {
+	rl := api.NewFixedWindow(1, time.Hour)
+	if !rl.Allow("keep") {
+		t.Fatal("keep first")
+	}
+	for i := 0; i < 3000; i++ {
+		_ = rl.Allow(fmt.Sprintf("flood-%d", i))
+	}
+	if rl.Allow("keep") {
+		t.Fatal("active key must stay limited; flood must not evict it")
+	}
+}
+
 func TestFixedWindowDisabled(t *testing.T) {
 	var rl *api.FixedWindow
 	if !rl.Allow("x") {
@@ -48,7 +62,7 @@ func TestExecuteRateLimitedIs429AndDoesNotBoot(t *testing.T) {
 	cfg.Rate = api.NewFixedWindow(1, time.Minute)
 	srv := api.NewServer(cfg, api.Dependencies{
 		Runtime: rt,
-		Limiter: resources.NoopLimiter{},
+		Limiter: resources.ProfileLimiter{},
 		Limits:  resources.DefaultProfile(),
 		Seccomp: resources.SeccompProfile{
 			DefaultAction: "SCMP_ACT_ERRNO",

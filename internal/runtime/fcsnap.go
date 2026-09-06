@@ -23,7 +23,17 @@ func networkMatches(rec *snapshot.Record, p network.Policy) bool {
 	if rec == nil {
 		return false
 	}
-	return rec.HasNetwork == (len(p.Allowlist) > 0)
+	wantNet := len(p.Allowlist) > 0
+	if rec.HasNetwork != wantNet {
+		return false
+	}
+	if !wantNet {
+		return true
+	}
+	if rec.AllowlistHash == "" {
+		return false
+	}
+	return rec.AllowlistHash == p.Fingerprint()
 }
 
 func (i *firecrackerInstance) maybeSnapshot() {
@@ -56,6 +66,7 @@ func (i *firecrackerInstance) saveSnapshot(ctx context.Context) error {
 	rec.VMID = i.id
 	rec.GuestCID = i.cid
 	fillRecordNetwork(rec, i.tap)
+	rec.AllowlistHash = i.netHash
 
 	kind := "Full"
 	if rec.Generation > 0 {
@@ -82,6 +93,11 @@ func (i *firecrackerInstance) saveSnapshot(ctx context.Context) error {
 	if err := i.client.pauseVM(snapCtx); err != nil {
 		return fmt.Errorf("pause vm: %w", err)
 	}
+	defer func() {
+		resCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = i.client.resumeVM(resCtx)
+	}()
 	if err := i.client.createSnapshot(snapCtx, kind, snapPath, memPath); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
@@ -122,6 +138,7 @@ func fillRecordNetwork(rec *snapshot.Record, link *network.Link) {
 	}
 	if link == nil {
 		rec.HasNetwork = false
+		rec.AllowlistHash = ""
 		return
 	}
 	rec.HasNetwork = true

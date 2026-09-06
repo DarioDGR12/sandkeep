@@ -114,12 +114,17 @@ func run() error {
 	}
 	mtls := tlsCfg != nil && tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert
 	jwksURL := strings.TrimSpace(os.Getenv("WARDEN_JWT_JWKS"))
+	jwtIssuer := strings.TrimSpace(os.Getenv("WARDEN_JWT_ISSUER"))
+	jwtAudience := envOr("WARDEN_JWT_AUDIENCE", "warden")
+	if err := api.CheckJWTConfig(jwksURL, jwtIssuer, jwtAudience); err != nil {
+		return err
+	}
 	var jwt *api.JWTVerifier
 	if jwksURL != "" {
 		jwt = &api.JWTVerifier{
 			JWKSURL:  jwksURL,
-			Issuer:   os.Getenv("WARDEN_JWT_ISSUER"),
-			Audience: envOr("WARDEN_JWT_AUDIENCE", "warden"),
+			Issuer:   jwtIssuer,
+			Audience: jwtAudience,
 		}
 	}
 	if err := api.CheckBindPolicy(listen, api.AuthPolicy{
@@ -149,6 +154,12 @@ func run() error {
 	httpCfg.Rate = buildRateLimit(listen)
 	httpCfg.HealthMinimal = os.Getenv("WARDEN_HEALTH_MINIMAL") == "1"
 	cgroupLimiter := resources.ProfileLimiter{Log: log}
+	bootTimeout := 20 * time.Second
+	if v := os.Getenv("WARDEN_BOOT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			bootTimeout = d
+		}
+	}
 	srv := api.NewServer(httpCfg, api.Dependencies{
 		Runtime:     rt,
 		Limiter:     cgroupLimiter,
@@ -159,7 +170,7 @@ func run() error {
 		AuditStrict: os.Getenv("WARDEN_AUDIT_STRICT") == "1",
 		Snapshots:   snaps,
 		Log:         log,
-		BootTimeout: 20 * time.Second,
+		BootTimeout: bootTimeout,
 		QueueWait:   queueWait,
 	})
 

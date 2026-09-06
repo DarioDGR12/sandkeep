@@ -29,6 +29,15 @@ func TestRequestRoundTripWithNewlinesInCode(t *testing.T) {
 	}
 }
 
+func TestReadRequestRejectsOversize(t *testing.T) {
+	huge := strings.Repeat("x", guestproto.MaxRequestBytes+32)
+	raw := `{"code":"` + huge + `","runtime":"python","timeout_s":1}`
+	_, err := guestproto.ReadRequest(strings.NewReader(raw))
+	if err == nil {
+		t.Fatal("oversized guest request must be rejected")
+	}
+}
+
 func TestReadResponseRejectsOversize(t *testing.T) {
 	huge := strings.Repeat("x", guestproto.MaxResponseBytes+32)
 	raw := `{"stdout":"` + huge + `","exit_code":0}`

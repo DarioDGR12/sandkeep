@@ -108,6 +108,9 @@ func (s *Server) authorize(r *http.Request) (method, cn string, ok bool) {
 	needKey := s.cfg.APIKey != ""
 	needJWT := s.cfg.JWT != nil
 	if !needKey && !needJWT {
+		if mtlsOK {
+			return "mtls", cn, true
+		}
 		return "none", cn, true
 	}
 

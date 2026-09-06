@@ -139,7 +139,8 @@ Variables de entorno:
 | --- | --- | --- |
 | `PORT` / `WARDEN_ADDR` | unset → `127.0.0.1:8080` | `PORT` implica `0.0.0.0:$PORT` |
 | `WARDEN_API_KEY` | unset | Una de: key, JWT o mTLS en bind público |
-| `WARDEN_JWT_JWKS` / `_ISSUER` / `_AUDIENCE` | unset / unset / `warden` | Bearer JWT RS256 |
+| `WARDEN_JWT_JWKS` / `_ISSUER` / `_AUDIENCE` | unset / **obligatorio si hay JWKS** / `warden` | Bearer JWT RS256; JWKS HTTP solo en loopback |
+| `WARDEN_BOOT_TIMEOUT` | `20s` | Presupuesto de Boot (API + VMM) |
 | `WARDEN_TLS_CERT` / `_KEY` / `_CLIENT_CA` | unset | HTTPS; CA de cliente = mTLS |
 | `WARDEN_AUTH_REQUIRE_ALL` | unset | `1` exige todos los métodos configurados |
 | `WARDEN_ALLOW_ANON` | unset | `1` override (solo red de confianza) |
@@ -194,7 +195,7 @@ POST /execute
   → JSON al agente
 ```
 
-El timeout de `POST /execute` cubre **solo el job**. Si el boot (o la cola) se acaba, HTTP 504 `boot_timeout` — no es un timeout de guest.
+El timeout de `POST /execute` cubre **solo el job**. Si el boot se acaba → 504 `boot_timeout`. Si el host cancela Execute sin resultado de guest → 504 `exec_timeout`. Un timeout **dentro** del guest sigue siendo HTTP 200 + `timed_out`.
 
 ### Levantar Firecracker de verdad
 
@@ -209,7 +210,7 @@ Decisiones de fase 2 que importan:
 
 - **Sin TAP si allowlist vacía.** El guest no tiene L3. Si hay destinos: netns `warden-<id>`, TAP dentro del ns (`172.25.x.x/30`), veth uplink (`172.27.x.x/30`), NAT masquerade y nft **fail-closed en el veth del host**. `host:port` abre solo ese puerto (tcp+udp); un host sin puerto abre todos. `pypi.org:443` no implica `:80`.
 - **Jailer opcional.** `WARDEN_JAILER=assets/jailer` (y casi siempre `WARDEN_JAILER_SUDO=1`): chroot en `{work_dir}/firecracker/<id>/root`, drop a uid/gid no-root, `/dev/kvm` + `/dev/net/tun` dentro del jail. El VMM ve `/vmlinux`, `/rootfs.ext4`, `/api.sock`.
-- **seccomp del VMM ≠ seccomp del guest.** El jailer/Firecracker traen el filtro del VMM. `configs/seccomp.json` no se inyecta al proceso KVM. El guest-agent pone `PR_SET_NO_NEW_PRIVS` y un **denylist** (mount, ptrace, kexec, bpf, …) — no es un allowlist completo porque rompería python/node.
+- **seccomp del VMM ≠ seccomp del guest.** `configs/seccomp.json` se **valida** fail-closed al arrancar y en `ProfileLimiter`; no se aplica a ningún proceso (inyectarlo al VMM rompería KVM). El guest-agent pone `PR_SET_NO_NEW_PRIVS` y un **denylist** (mount, ptrace, kexec, bpf, …).
 - **cgroups.** Tras spawn se mueve el PID del VMM **y sus hijos**. En bind público el attach es fail-closed por defecto (`WARDEN_CGROUP_REQUIRED=0` lo relaja).
 - **rlimits + fence en el guest.** `RLIMIT_AS` / `NPROC` / `NOFILE`, un job a la vez, código máx. 64 KiB. El host rechaza respuestas vsock > ~2 MiB.
 - **Copia del rootfs:** pool de N clones precalentados (`data/vms/pool/`). Un miss clona en el momento. Nunca se devuelve un disco sucio al pool. `cp --reflink=auto` con fallback a copy. El kernel se hardlinkea. El store de sesión vive en `data/snapshots/` (nunca dentro del workdir de la VM).

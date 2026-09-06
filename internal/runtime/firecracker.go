@@ -136,6 +136,7 @@ func (f *Firecracker) bootOne(ctx context.Context, spec Spec, rec *snapshot.Reco
 		language:  spec.Language,
 		sessionID: spec.SessionID,
 		limits:    spec.Limits,
+		netHash:   spec.Network.Fingerprint(),
 		store:     f.cfg.Snapshots,
 		cid:       cid,
 		port:      f.cfg.AgentPort,
@@ -286,6 +287,7 @@ type firecrackerInstance struct {
 	language      string
 	sessionID     string
 	limits        resources.Profile
+	netHash       string
 	store         snapshot.Store
 	snapRec       *snapshot.Record
 	jailed        bool

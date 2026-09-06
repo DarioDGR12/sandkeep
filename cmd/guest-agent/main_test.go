@@ -55,6 +55,54 @@ func TestExecuteUnknownRuntime(t *testing.T) {
 	}
 }
 
+func TestGuestBusyOnSecondJob(t *testing.T) {
+	ln, err := listen("tcp:127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handle(conn)
+		}
+	}()
+
+	dial := func() net.Conn {
+		c, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	slow := dial()
+	defer slow.Close()
+	if err := guestproto.WriteRequest(slow, guestproto.Request{
+		Code: "import time; time.sleep(2)", Runtime: "python", TimeoutS: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	fast := dial()
+	defer fast.Close()
+	if err := guestproto.WriteRequest(fast, guestproto.Request{
+		Code: "print(1)", Runtime: "python", TimeoutS: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = fast.SetDeadline(time.Now().Add(2 * time.Second))
+	resp, err := guestproto.ReadResponse(fast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ExitCode != 1 || !strings.Contains(resp.Stderr, "busy") {
+		t.Fatalf("second job must be busy: %+v", resp)
+	}
+}
+
 func TestExecuteRejectsHugeCode(t *testing.T) {
 	resp := execute(guestproto.Request{
 		Code:     strings.Repeat("x", guestproto.MaxCodeBytes+1),
