@@ -12,7 +12,6 @@ import (
 	"github.com/DarioDGR12/sandkeep/internal/audit"
 	"github.com/DarioDGR12/sandkeep/internal/network"
 	"github.com/DarioDGR12/sandkeep/internal/resources"
-	"github.com/DarioDGR12/sandkeep/internal/runtime"
 )
 
 func TestFixedWindowPerKey(t *testing.T) {

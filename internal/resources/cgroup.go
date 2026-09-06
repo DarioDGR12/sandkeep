@@ -47,7 +47,12 @@ func (c CgroupV2) Attach(id string, pid int, profile Profile) (func() error, err
 		for _, p := range append([]int{pid}, descendantPIDs(pid)...) {
 			_ = os.WriteFile(filepath.Join(parent, "cgroup.procs"), []byte(strconv.Itoa(p)), 0o644)
 		}
-		return os.Remove(dir)
+		if err := os.Remove(dir); err == nil {
+			return nil
+		}
+		// Real cgroupfs rmdirs once tasks are gone. A fake sysfs in tests
+		// still has the controller files we wrote, so fall back to RemoveAll.
+		return os.RemoveAll(dir)
 	}
 
 	if err := writeCgroup(dir, "memory.max", strconv.FormatInt(profile.MemoryBytes, 10)); err != nil {
