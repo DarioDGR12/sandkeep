@@ -1,0 +1,28 @@
+# Binaries
+/warden
+/bin/
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+
+# Runtime / local state (ephemeral on cloud hosts anyway)
+/data/
+*.log
+audit.jsonl
+
+# Firecracker assets (kernel, rootfs, binaries) — fetch/build via scripts/
+/assets/firecracker
+/assets/jailer
+/assets/vmlinux
+/assets/vmlinux.bin
+/assets/rootfs.ext4
+/bin/guest-agent
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
