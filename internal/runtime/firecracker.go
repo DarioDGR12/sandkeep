@@ -136,6 +136,7 @@ func (f *Firecracker) bootOne(ctx context.Context, spec Spec, rec *snapshot.Reco
 		language:  spec.Language,
 		sessionID: spec.SessionID,
 		limits:    spec.Limits,
+		netHash:   spec.Network.Fingerprint(),
 		store:     f.cfg.Snapshots,
 		cid:       cid,
 		port:      f.cfg.AgentPort,
@@ -170,6 +171,12 @@ func (f *Firecracker) bootOne(ctx context.Context, spec Spec, rec *snapshot.Reco
 		return nil, err
 	}
 	return inst, nil
+}
+
+// rootfsReadOnly is true for disposable jobs. Session VMs keep a writable
+// disk so dirty-page snapshots can persist guest files.
+func rootfsReadOnly(sessionID string) bool {
+	return strings.TrimSpace(sessionID) == ""
 }
 
 func denyNetworkOrFail(p network.Policy, tap network.TapFactory) error {
@@ -248,7 +255,7 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 		return inst.client.configure(ctx,
 			fcMachineConfig{VCPUCount: f.cfg.VCPUCount, MemSizeMiB: memMiB, SMT: false, TrackDirtyPages: true},
 			fcBootSource{KernelImagePath: paths.guestKernel, BootArgs: bootArgs},
-			fcDrive{DriveID: "rootfs", PathOnHost: paths.guestRootfs, IsRootDevice: true, IsReadOnly: false},
+			fcDrive{DriveID: "rootfs", PathOnHost: paths.guestRootfs, IsRootDevice: true, IsReadOnly: rootfsReadOnly(spec.SessionID)},
 			fcVsock{GuestCID: inst.cid, UDSPath: paths.guestVsock},
 			&fcLogger{LogPath: paths.guestLog, Level: "Info", ShowLevel: true},
 			nic,
@@ -286,6 +293,7 @@ type firecrackerInstance struct {
 	language      string
 	sessionID     string
 	limits        resources.Profile
+	netHash       string
 	store         snapshot.Store
 	snapRec       *snapshot.Record
 	jailed        bool
@@ -307,6 +315,7 @@ type firecrackerInstance struct {
 	waitOnce      sync.Once
 	waitErr       error
 	exited        chan struct{}
+	snapOK        bool
 }
 
 func (i *firecrackerInstance) ID() string { return i.id }
@@ -332,6 +341,7 @@ func (i *firecrackerInstance) Execute(ctx context.Context, req ExecRequest) (Res
 		TimeoutS:    int(req.Timeout / time.Second),
 		MemoryBytes: i.limits.MemoryBytes,
 		PIDsMax:     i.limits.PIDsMax,
+		DiskBytes:   i.limits.DiskBytes,
 	}); err != nil {
 		return Result{}, err
 	}
@@ -350,6 +360,7 @@ func (i *firecrackerInstance) Execute(ctx context.Context, req ExecRequest) (Res
 		TimedOut: resp.TimedOut,
 	}
 	i.maybeSnapshot()
+	res.SnapshotSaved = i.snapOK
 	return res, nil
 }
 

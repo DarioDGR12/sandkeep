@@ -15,16 +15,17 @@ type ExecuteRequest struct {
 // A completed guest run — including non-zero exit and timeout — is HTTP 200.
 // HTTP 4xx/5xx means Warden itself rejected or failed the request.
 type ExecuteResponse struct {
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
-	ExitCode   int    `json:"exit_code"`
-	VMID       string `json:"vm_id"`
-	Runtime    string `json:"runtime"`
-	RequestID  string `json:"request_id"`
-	SessionID  string `json:"session_id,omitempty"`
-	DurationMS int64  `json:"duration_ms"`
-	TimedOut   bool   `json:"timed_out"`
-	Backend    string `json:"backend"`
+	Stdout        string `json:"stdout"`
+	Stderr        string `json:"stderr"`
+	ExitCode      int    `json:"exit_code"`
+	VMID          string `json:"vm_id"`
+	Runtime       string `json:"runtime"`
+	RequestID     string `json:"request_id"`
+	SessionID     string `json:"session_id,omitempty"`
+	DurationMS    int64  `json:"duration_ms"`
+	TimedOut      bool   `json:"timed_out"`
+	Backend       string `json:"backend"`
+	SnapshotSaved bool   `json:"snapshot_saved,omitempty"`
 }
 
 // ErrorBody is a machine-readable API error.
@@ -45,6 +46,8 @@ const (
 	CodeUnauthorized   = "unauthorized"
 	CodeBusy           = "busy"
 	CodeRateLimited    = "rate_limited"
+	CodeBootTimeout    = "boot_timeout"
+	CodeExecTimeout    = "exec_timeout"
 	CodeAuditFailed    = "audit_failed"
 )
 
@@ -60,15 +63,16 @@ const (
 
 func resultToResponse(req ExecuteRequest, requestID string, backend string, res runtime.Result, durationMS int64) ExecuteResponse {
 	return ExecuteResponse{
-		Stdout:     res.Stdout,
-		Stderr:     res.Stderr,
-		ExitCode:   res.ExitCode,
-		VMID:       res.VMID,
-		Runtime:    req.Runtime,
-		RequestID:  requestID,
-		SessionID:  req.SessionID,
-		DurationMS: durationMS,
-		TimedOut:   res.TimedOut,
-		Backend:    backend,
+		Stdout:        res.Stdout,
+		Stderr:        res.Stderr,
+		ExitCode:      res.ExitCode,
+		VMID:          res.VMID,
+		Runtime:       req.Runtime,
+		RequestID:     requestID,
+		SessionID:     req.SessionID,
+		DurationMS:    durationMS,
+		TimedOut:      res.TimedOut,
+		Backend:       backend,
+		SnapshotSaved: res.SnapshotSaved,
 	}
 }

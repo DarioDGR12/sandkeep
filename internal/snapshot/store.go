@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -28,28 +29,29 @@ var ErrNotFound = errors.New("snapshot: not found")
 // the snapshot's virtio-blk still points at. Network fields are the TAP
 // names/addresses baked into the snap (host_dev_name cannot change).
 type Record struct {
-	SessionID    string    `json:"session_id"`
-	VMID         string    `json:"vm_id"`
-	Path         string    `json:"path"`
-	SnapshotPath string    `json:"snapshot_path"`
-	MemoryPath   string    `json:"memory_path"`
-	RootfsPath   string    `json:"rootfs_path,omitempty"`
-	GuestCID     uint32    `json:"guest_cid,omitempty"`
-	HasNetwork   bool      `json:"has_network"`
-	HostDevName  string    `json:"host_dev_name,omitempty"`
-	GuestMAC     string    `json:"guest_mac,omitempty"`
-	GuestIP      string    `json:"guest_ip,omitempty"`
-	HostIP       string    `json:"host_ip,omitempty"`
-	NetNS        string    `json:"netns,omitempty"`
-	NetNSPath    string    `json:"netns_path,omitempty"`
-	HostVeth     string    `json:"host_veth,omitempty"`
-	NSVeth       string    `json:"ns_veth,omitempty"`
-	UplinkHost   string    `json:"uplink_host,omitempty"`
-	UplinkNS     string    `json:"uplink_ns,omitempty"`
-	Table        string    `json:"table,omitempty"`
-	Generation   int       `json:"generation"`
-	LastKind     string    `json:"last_kind,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	SessionID     string    `json:"session_id"`
+	VMID          string    `json:"vm_id"`
+	Path          string    `json:"path"`
+	SnapshotPath  string    `json:"snapshot_path"`
+	MemoryPath    string    `json:"memory_path"`
+	RootfsPath    string    `json:"rootfs_path,omitempty"`
+	GuestCID      uint32    `json:"guest_cid,omitempty"`
+	HasNetwork    bool      `json:"has_network"`
+	HostDevName   string    `json:"host_dev_name,omitempty"`
+	GuestMAC      string    `json:"guest_mac,omitempty"`
+	GuestIP       string    `json:"guest_ip,omitempty"`
+	HostIP        string    `json:"host_ip,omitempty"`
+	NetNS         string    `json:"netns,omitempty"`
+	NetNSPath     string    `json:"netns_path,omitempty"`
+	HostVeth      string    `json:"host_veth,omitempty"`
+	NSVeth        string    `json:"ns_veth,omitempty"`
+	UplinkHost    string    `json:"uplink_host,omitempty"`
+	UplinkNS      string    `json:"uplink_ns,omitempty"`
+	Table         string    `json:"table,omitempty"`
+	AllowlistHash string    `json:"allowlist_hash,omitempty"`
+	Generation    int       `json:"generation"`
+	LastKind      string    `json:"last_kind,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // Store allocates snapshot destinations and remembers committed records.
@@ -175,6 +177,9 @@ func (d *DirStore) Commit(_ context.Context, rec *Record) error {
 		rec.CreatedAt = time.Now().UTC()
 	}
 	rec.Path = dir
+	if err := pathsContained(dir, rec); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return err
@@ -203,6 +208,9 @@ func (d *DirStore) Restore(_ context.Context, sessionID string) (*Record, error)
 	if err := json.Unmarshal(raw, &rec); err != nil {
 		return nil, fmt.Errorf("snapshot: corrupt meta for %s: %w", sessionID, err)
 	}
+	if err := pathsContained(dir, &rec); err != nil {
+		return nil, err
+	}
 	for _, p := range []string{rec.SnapshotPath, rec.MemoryPath} {
 		if p == "" {
 			return nil, fmt.Errorf("snapshot: corrupt session %s: missing path in meta", sessionID)
@@ -212,6 +220,34 @@ func (d *DirStore) Restore(_ context.Context, sessionID string) (*Record, error)
 		}
 	}
 	return &rec, nil
+}
+
+func pathsContained(dir string, rec *Record) error {
+	for _, p := range []string{rec.SnapshotPath, rec.MemoryPath, rec.RootfsPath} {
+		if p == "" {
+			continue
+		}
+		if err := mustContain(dir, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mustContain(dir, p string) error {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	absP, err := filepath.Abs(p)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(absDir, absP)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("snapshot: path %s is outside %s", p, dir)
+	}
+	return nil
 }
 
 // Delete implements Store.

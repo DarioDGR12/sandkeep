@@ -43,6 +43,12 @@ func run() error {
 		return err
 	}
 	defer ln.Close()
+	if err := applyGuestFence(); err != nil {
+		return fmt.Errorf("guest fence: %w", err)
+	}
+	if err := os.Chdir("/tmp"); err != nil {
+		log.Printf("chdir /tmp: %v", err)
+	}
 	log.Printf("guest-agent listening on %s", addr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -66,6 +72,8 @@ func run() error {
 	}
 }
 
+var jobSlots = make(chan struct{}, 1)
+
 func handle(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
@@ -75,6 +83,13 @@ func handle(conn net.Conn) {
 		log.Printf("read: %v", err)
 		return
 	}
+	select {
+	case jobSlots <- struct{}{}:
+		defer func() { <-jobSlots }()
+	default:
+		_ = guestproto.WriteResponse(conn, guestproto.Response{Stderr: "guest: busy", ExitCode: 1})
+		return
+	}
 	resp := execute(req)
 	if err := guestproto.WriteResponse(conn, resp); err != nil {
 		log.Printf("write: %v", err)
@@ -82,6 +97,9 @@ func handle(conn net.Conn) {
 }
 
 func execute(req guestproto.Request) guestproto.Response {
+	if len(req.Code) > guestproto.MaxCodeBytes {
+		return guestproto.Response{Stderr: "guest: code too large", ExitCode: 127}
+	}
 	timeout := time.Duration(req.TimeoutS) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -99,7 +117,9 @@ func execute(req guestproto.Request) guestproto.Response {
 	stderr.rest = guestproto.MaxOutputBytes
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Dir = "/tmp"
+	cmd.Env = guestJobEnv()
+	cmd.SysProcAttr = guestJobSysAttr()
 
 	if err := cmd.Start(); err != nil {
 		return guestproto.Response{Stderr: err.Error(), ExitCode: 1}
@@ -195,7 +215,50 @@ func applyGuestLimits(pid int, req guestproto.Request) error {
 	if err := unix.Prlimit(pid, unix.RLIMIT_NOFILE, &nofile, nil); err != nil {
 		return fmt.Errorf("RLIMIT_NOFILE: %w", err)
 	}
+	fsize := req.DiskBytes
+	if fsize <= 0 {
+		fsize = 1 << 30
+	}
+	fs := unix.Rlimit{Cur: uint64(fsize), Max: uint64(fsize)}
+	if err := unix.Prlimit(pid, unix.RLIMIT_FSIZE, &fs, nil); err != nil {
+		return fmt.Errorf("RLIMIT_FSIZE: %w", err)
+	}
+	core := unix.Rlimit{Cur: 0, Max: 0}
+	if err := unix.Prlimit(pid, unix.RLIMIT_CORE, &core, nil); err != nil {
+		return fmt.Errorf("RLIMIT_CORE: %w", err)
+	}
 	return nil
+}
+
+func guestJobEnv() []string {
+	return []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"HOME=/tmp",
+		"TMPDIR=/tmp",
+		"LANG=C.UTF-8",
+		"PYTHONDONTWRITEBYTECODE=1",
+		"PYTHONNOUSERSITE=1",
+		"NODE_OPTIONS=",
+	}
+}
+
+// guestJobSysAttr isolates the interpreter from the guest-agent process.
+// PID 1 is root; jobs drop to nobody (65534) so they cannot raise rlimits,
+// rewrite the agent, or regain privileges. Host-side unit tests keep the
+// current uid because they are not root.
+func guestJobSysAttr() *syscall.SysProcAttr {
+	attr := &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
+	}
+	if os.Geteuid() == 0 {
+		attr.Credential = &syscall.Credential{
+			Uid:         65534,
+			Gid:         65534,
+			NoSetGroups: true,
+		}
+	}
+	return attr
 }
 
 func killProcessGroup(cmd *exec.Cmd) {
@@ -248,10 +311,16 @@ func listenVsock(port uint32) (net.Listener, error) {
 }
 
 func mountEssential() error {
-	mounts := []struct{ src, dst, fstype string }{
-		{"proc", "/proc", "proc"},
-		{"sysfs", "/sys", "sysfs"},
-		{"devtmpfs", "/dev", "devtmpfs"},
+	type mnt struct {
+		src, dst, fstype, data string
+		flags                  uintptr
+	}
+	hard := syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC
+	mounts := []mnt{
+		{"proc", "/proc", "proc", "hidepid=2", uintptr(hard)},
+		{"sysfs", "/sys", "sysfs", "", uintptr(hard)},
+		{"devtmpfs", "/dev", "devtmpfs", "", uintptr(syscall.MS_NOSUID | syscall.MS_NOEXEC)},
+		{"tmpfs", "/tmp", "tmpfs", "size=64m,mode=1777", uintptr(hard)},
 	}
 	var errs []error
 	for _, m := range mounts {
@@ -259,7 +328,14 @@ func mountEssential() error {
 			errs = append(errs, err)
 			continue
 		}
-		if err := syscall.Mount(m.src, m.dst, m.fstype, 0, ""); err != nil && !errors.Is(err, syscall.EBUSY) && !errors.Is(err, syscall.EEXIST) {
+		err := syscall.Mount(m.src, m.dst, m.fstype, m.flags, m.data)
+		if err != nil && (errors.Is(err, syscall.EBUSY) || errors.Is(err, syscall.EEXIST)) {
+			continue
+		}
+		if err != nil && m.data != "" {
+			err = syscall.Mount(m.src, m.dst, m.fstype, m.flags, "")
+		}
+		if err != nil && !errors.Is(err, syscall.EBUSY) && !errors.Is(err, syscall.EEXIST) {
 			errs = append(errs, fmt.Errorf("mount %s: %w", m.dst, err))
 		}
 	}

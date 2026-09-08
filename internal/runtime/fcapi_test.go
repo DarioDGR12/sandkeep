@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -148,7 +149,7 @@ func TestFCClientSurfaceFault(t *testing.T) {
 
 	c := newFCClient(sock, time.Second)
 	err = c.startInstance(context.Background())
-	if err == nil || err.Error() == "" {
-		t.Fatalf("want fault, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "bad drive") {
+		t.Fatalf("want fault_message propagated, got %v", err)
 	}
 }

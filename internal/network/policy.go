@@ -7,10 +7,13 @@
 package network
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -32,6 +35,18 @@ type Filter interface {
 // StaticFilter is an immutable policy loaded at process start.
 type StaticFilter struct {
 	policy Policy
+}
+
+// Fingerprint is a stable hash of the allowlist. Used so a session snapshot
+// is not restored after the egress policy changes.
+func (p Policy) Fingerprint() string {
+	entries := append([]string(nil), p.Allowlist...)
+	for i := range entries {
+		entries[i] = strings.TrimSpace(strings.ToLower(entries[i]))
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // Default returns a deny-all policy with an empty allowlist.
@@ -89,24 +104,29 @@ func (f *StaticFilter) Policy() Policy {
 	return cp
 }
 
-// Allows reports whether a guest dial to hostport (host, host:port, or CIDR-ish
-// host) is permitted. Matching is exact host or host:port against the allowlist.
+// Allows reports whether a guest dial to hostport is permitted.
+// A host-only allowlist entry matches any port. A host:port entry
+// matches only that port (pypi.org:443 does not allow :80).
 func (f *StaticFilter) Allows(hostport string) bool {
 	hostport = strings.TrimSpace(strings.ToLower(hostport))
 	if hostport == "" {
 		return false
 	}
-	host, _, err := net.SplitHostPort(hostport)
+	host, port, err := net.SplitHostPort(hostport)
 	if err != nil {
 		host = hostport
+		port = ""
 	}
 	for _, raw := range f.policy.Allowlist {
 		entry := strings.TrimSpace(strings.ToLower(raw))
-		if entry == hostport || entry == host {
-			return true
+		eHost, ePort, eerr := net.SplitHostPort(entry)
+		if eerr != nil {
+			if entry == host || entry == hostport {
+				return true
+			}
+			continue
 		}
-		entryHost, _, err := net.SplitHostPort(entry)
-		if err == nil && (entryHost == host || entry == hostport) {
+		if eHost == host && ePort == port {
 			return true
 		}
 	}

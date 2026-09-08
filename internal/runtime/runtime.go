@@ -18,6 +18,10 @@ import (
 // ErrNotImplemented is kept for leftover fail-closed hooks.
 var ErrNotImplemented = errors.New("firecracker feature is not implemented yet")
 
+// ErrBootTimeout is returned when Boot (including the VM queue wait) expires
+// before a guest result exists. That is a Warden failure, not a guest timeout.
+var ErrBootTimeout = errors.New("runtime: boot timed out")
+
 // Supported guest language runtimes for phase 1.
 const (
 	LangPython = "python"
@@ -41,11 +45,12 @@ type ExecRequest struct {
 
 // Result is what /execute returns to the agent.
 type Result struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	VMID     string
-	TimedOut bool
+	Stdout        string
+	Stderr        string
+	ExitCode      int
+	VMID          string
+	TimedOut      bool
+	SnapshotSaved bool
 }
 
 // Instance is a booted (or stubbed) microVM.

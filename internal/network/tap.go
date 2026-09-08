@@ -211,24 +211,24 @@ func (t *TAP) fillDerived(link *Link) {
 	}
 }
 
-func (t *TAP) precheck(policy Policy) ([]net.IP, error) {
+func (t *TAP) precheck(policy Policy) ([]Dest, error) {
 	if err := policy.Validate(); err != nil {
 		return nil, err
 	}
 	if len(policy.Allowlist) == 0 {
 		return nil, fmt.Errorf("tap: refusing to create a NIC for an empty allowlist")
 	}
-	ips, err := resolveAllowlist(policy.Allowlist, t.Lookup)
+	dests, err := resolveAllowlist(policy.Allowlist, t.Lookup)
 	if err != nil {
 		return nil, err
 	}
-	if len(ips) == 0 {
+	if len(dests) == 0 {
 		return nil, fmt.Errorf("tap: allowlist resolved to zero addresses")
 	}
-	return ips, nil
+	return dests, nil
 }
 
-func (t *TAP) apply(link *Link, ips []net.IP) error {
+func (t *TAP) apply(link *Link, dests []Dest) error {
 	if err := validateNetNSName(link.NetNS); err != nil {
 		return err
 	}
@@ -288,7 +288,7 @@ func (t *TAP) apply(link *Link, ips []net.IP) error {
 	_ = t.run("sysctl", "-w", "net.ipv4.ip_forward=1")
 	_ = t.runNS(link.NetNS, "sysctl", "-w", "net.ipv4.ip_forward=1")
 
-	if err := t.applyRules(RenderNFT(link, ips)); err != nil {
+	if err := t.applyRules(RenderNFT(link, dests)); err != nil {
 		return err
 	}
 	cleanup = false
@@ -407,35 +407,54 @@ func macFromIP(ip net.IP) string {
 	return fmt.Sprintf("06:00:%02x:%02x:%02x:%02x", ip[0], ip[1], ip[2], ip[3])
 }
 
-func resolveAllowlist(entries []string, lookup func(string) ([]net.IP, error)) ([]net.IP, error) {
+func resolveAllowlist(entries []string, lookup func(string) ([]net.IP, error)) ([]Dest, error) {
 	if lookup == nil {
 		lookup = net.LookupIP
 	}
 	seen := map[string]struct{}{}
-	var out []net.IP
+	var out []Dest
 	for _, raw := range entries {
 		host := strings.TrimSpace(raw)
-		if h, _, err := net.SplitHostPort(host); err == nil {
+		port := 0
+		if h, p, err := net.SplitHostPort(host); err == nil {
 			host = h
-		}
-		if ip := net.ParseIP(host); ip != nil {
-			if _, ok := seen[ip.String()]; !ok {
-				seen[ip.String()] = struct{}{}
-				out = append(out, ip)
+			n, convErr := parsePort(p)
+			if convErr != nil {
+				return nil, fmt.Errorf("allowlist %q: %w", raw, convErr)
 			}
-			continue
+			port = n
 		}
-		ips, err := lookup(host)
+		ips, err := lookupHost(host, lookup)
 		if err != nil {
-			return nil, fmt.Errorf("resolve %q: %w", host, err)
+			return nil, err
 		}
 		for _, ip := range ips {
-			if _, ok := seen[ip.String()]; ok {
+			key := fmt.Sprintf("%s/%d", ip.String(), port)
+			if _, ok := seen[key]; ok {
 				continue
 			}
-			seen[ip.String()] = struct{}{}
-			out = append(out, ip)
+			seen[key] = struct{}{}
+			out = append(out, Dest{IP: ip, Port: port})
 		}
 	}
 	return out, nil
+}
+
+func lookupHost(host string, lookup func(string) ([]net.IP, error)) ([]net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return []net.IP{ip}, nil
+	}
+	ips, err := lookup(host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", host, err)
+	}
+	return ips, nil
+}
+
+func parsePort(p string) (int, error) {
+	var n int
+	if _, err := fmt.Sscanf(p, "%d", &n); err != nil || n < 1 || n > 65535 {
+		return 0, fmt.Errorf("invalid port %q", p)
+	}
+	return n, nil
 }

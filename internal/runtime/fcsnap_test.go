@@ -27,11 +27,27 @@ func TestNetworkMatches(t *testing.T) {
 	if networkMatches(&snapshot.Record{HasNetwork: true}, deny) {
 		t.Fatal("nic snap + deny-all must not restore")
 	}
-	if !networkMatches(&snapshot.Record{HasNetwork: true}, allow) {
-		t.Fatal("nic snap + allowlist")
+	if networkMatches(&snapshot.Record{HasNetwork: true}, allow) {
+		t.Fatal("nic snap without allowlist hash must not restore")
+	}
+	if !networkMatches(&snapshot.Record{HasNetwork: true, AllowlistHash: allow.Fingerprint()}, allow) {
+		t.Fatal("nic snap + matching allowlist")
+	}
+	other := network.Policy{DefaultPolicy: network.PolicyDeny, Allowlist: []string{"9.9.9.9"}}
+	if networkMatches(&snapshot.Record{HasNetwork: true, AllowlistHash: allow.Fingerprint()}, other) {
+		t.Fatal("allowlist change must invalidate the snap")
 	}
 	if networkMatches(&snapshot.Record{HasNetwork: false}, allow) {
 		t.Fatal("isolated snap + allowlist must not restore")
+	}
+}
+
+func TestRootfsReadOnlyEphemeral(t *testing.T) {
+	if !rootfsReadOnly("") {
+		t.Fatal("ephemeral VM rootfs must be read-only")
+	}
+	if rootfsReadOnly("agent-1") {
+		t.Fatal("session VM rootfs must stay writable")
 	}
 }
 

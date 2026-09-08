@@ -60,6 +60,22 @@ func TestCgroupV2WritesControllers(t *testing.T) {
 	}
 }
 
+func TestCgroupRequireFailsOnReadOnlyFakeRoot(t *testing.T) {
+	root := t.TempDir()
+	self := filepath.Join(t.TempDir(), "cgroup")
+	if err := os.WriteFile(self, []byte("0::/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	c := resources.CgroupV2{Root: root, Self: self, Require: true}
+	if _, err := c.Attach("x", 1, resources.DefaultProfile()); err == nil {
+		t.Fatal("Require must fail when the cgroup dir cannot be created")
+	}
+}
+
 func TestCgroupV2RejectsTinyMemory(t *testing.T) {
 	c := resources.CgroupV2{Require: true, Root: t.TempDir(), Self: filepath.Join(t.TempDir(), "missing")}
 	p := resources.DefaultProfile()

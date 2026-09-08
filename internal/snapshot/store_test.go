@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/DarioDGR12/sandkeep/internal/snapshot"
@@ -74,6 +75,47 @@ func TestDirStoreRoundTrip(t *testing.T) {
 	}
 	if _, err := store.Restore(ctx, "agent-1"); !errors.Is(err, snapshot.ErrNotFound) {
 		t.Fatalf("after delete: %v", err)
+	}
+}
+
+func TestDirStoreRejectsEscapingMetaPaths(t *testing.T) {
+	dir := t.TempDir()
+	store := snapshot.NewDirStore(dir)
+	ctx := context.Background()
+	rec, err := store.Prepare(ctx, "s1", "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{rec.SnapshotPath, rec.MemoryPath, rec.RootfsPath} {
+		if err := os.WriteFile(p, []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(outside, []byte("secret"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	rec.SnapshotPath = outside
+	if err := store.Commit(ctx, rec); err == nil {
+		t.Fatal("commit must reject paths outside the session dir")
+	}
+
+	// Restore of tampered meta
+	rec.SnapshotPath = filepath.Join(dir, "s1", "vm.snap")
+	if err := store.Commit(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(dir, "s1", "meta.json")
+	raw, err := os.ReadFile(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(raw), rec.MemoryPath, outside, 1)
+	if err := os.WriteFile(meta, []byte(tampered), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Restore(ctx, "s1"); err == nil {
+		t.Fatal("restore must reject escaping memory path")
 	}
 }
 

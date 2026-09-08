@@ -117,6 +117,9 @@ func jailerCommand(cfg Config, layout jailLayout, netnsPath string) (*exec.Cmd, 
 
 func jailerCreds(cfg Config) (uid, gid int, err error) {
 	if cfg.JailerUID != 0 || cfg.JailerGID != 0 {
+		if cfg.JailerUID == 0 {
+			return 0, 0, fmt.Errorf("jailer refuses to drop to uid 0; set WARDEN_JAILER_UID to an unprivileged user")
+		}
 		return cfg.JailerUID, cfg.JailerGID, nil
 	}
 	u, err := user.Current()

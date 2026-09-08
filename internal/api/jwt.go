@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"strings"
@@ -86,10 +87,10 @@ func (v *JWTVerifier) Valid(token string) bool {
 	if claims.Nbf != 0 && now < claims.Nbf {
 		return false
 	}
-	if v.Issuer != "" && claims.Iss != v.Issuer {
+	if strings.TrimSpace(v.Issuer) == "" || claims.Iss != v.Issuer {
 		return false
 	}
-	if v.Audience != "" && !audContains(claims.Aud, v.Audience) {
+	if strings.TrimSpace(v.Audience) == "" || !audContains(claims.Aud, v.Audience) {
 		return false
 	}
 	key, err := v.key(hdr.Kid)
@@ -131,6 +132,9 @@ func (v *JWTVerifier) refreshLocked() error {
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
+	if err := checkJWKSURL(v.JWKSURL); err != nil {
+		return err
+	}
 	resp, err := client.Get(v.JWKSURL)
 	if err != nil {
 		return err
@@ -139,9 +143,20 @@ func (v *JWTVerifier) refreshLocked() error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("jwks: HTTP %d", resp.StatusCode)
 	}
-	var doc jwksDoc
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	const maxJWKS = 1 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKS+1))
+	if err != nil {
 		return err
+	}
+	if len(raw) > maxJWKS {
+		return fmt.Errorf("jwks: document exceeds %d bytes", maxJWKS)
+	}
+	var doc jwksDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	if len(doc.Keys) > 16 {
+		doc.Keys = doc.Keys[:16]
 	}
 	keys := map[string]*rsa.PublicKey{}
 	for _, k := range doc.Keys {
@@ -201,4 +216,28 @@ func audContains(aud any, want string) bool {
 
 func looksLikeJWT(token string) bool {
 	return strings.Count(token, ".") == 2
+}
+
+// CheckJWTConfig fail-closes incomplete JWT settings. JWKS without an
+// issuer would accept any RS256 token signed by those keys.
+func CheckJWTConfig(jwksURL, issuer, audience string) error {
+	if strings.TrimSpace(jwksURL) == "" {
+		return nil
+	}
+	if strings.TrimSpace(issuer) == "" {
+		return fmt.Errorf("WARDEN_JWT_JWKS requires WARDEN_JWT_ISSUER")
+	}
+	if strings.TrimSpace(audience) == "" {
+		return fmt.Errorf("WARDEN_JWT_JWKS requires a non-empty audience")
+	}
+	return checkJWKSURL(jwksURL)
+}
+
+func checkJWKSURL(raw string) error {
+	if !strings.HasPrefix(strings.ToLower(raw), "https://") && !strings.HasPrefix(strings.ToLower(raw), "http://127.0.0.1") && !strings.HasPrefix(strings.ToLower(raw), "http://localhost") {
+		if strings.HasPrefix(strings.ToLower(raw), "http://") {
+			return fmt.Errorf("jwks: HTTP JWKS is only allowed on loopback")
+		}
+	}
+	return nil
 }

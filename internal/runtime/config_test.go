@@ -1,10 +1,12 @@
 package runtime_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/DarioDGR12/sandkeep/internal/network"
@@ -58,6 +60,30 @@ func TestBootRejectsAllowlist(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected allowlist error")
 	}
+	if !strings.Contains(err.Error(), "TAP factory") {
+		t.Fatalf("must refuse silent no-NIC boot: %v", err)
+	}
+}
+
+func TestLoadConfigJailerDefaultsPIDAndCgroup(t *testing.T) {
+	t.Setenv("WARDEN_JAILER", "/usr/bin/jailer")
+	t.Setenv("WARDEN_JAILER_CGROUP", "")
+	t.Setenv("WARDEN_JAILER_NEWPID", "")
+	cfg, err := runtime.LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.JailerCgroup || !cfg.NewPIDNS {
+		t.Fatalf("jailer should default cgroup+newpid: %+v", cfg)
+	}
+	t.Setenv("WARDEN_JAILER_NEWPID", "0")
+	cfg, err = runtime.LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NewPIDNS {
+		t.Fatal("WARDEN_JAILER_NEWPID=0 must disable")
+	}
 }
 
 func TestLoadConfigEnvOverlay(t *testing.T) {
@@ -76,5 +102,43 @@ func TestLoadConfigEnvOverlay(t *testing.T) {
 	}
 	if cfg.RootfsPoolSize != 4 {
 		t.Fatalf("pool=%d", cfg.RootfsPoolSize)
+	}
+}
+
+func TestBootRejectsOversizedRootfs(t *testing.T) {
+	dir := t.TempDir()
+	touch := func(name string, n int) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, bytes.Repeat([]byte("x"), n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	limits := resources.DefaultProfile()
+	limits.DiskBytes = 1 << 20
+	rt := runtime.NewFirecrackerWithConfig(runtime.Config{
+		Binary:  touch("fc", 8),
+		Kernel:  touch("vmlinux", 8),
+		Rootfs:  touch("root.ext4", (1<<20)+64),
+		WorkDir: dir,
+	})
+	_, err := rt.Boot(context.Background(), runtime.Spec{
+		Language: runtime.LangPython,
+		Limits:   limits,
+		Network:  network.Default(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "disk limit") {
+		t.Fatalf("want disk limit error, got %v", err)
+	}
+}
+
+func TestLoadConfigSnapshotDirOff(t *testing.T) {
+	t.Setenv("WARDEN_SNAPSHOT_DIR", "off")
+	cfg, err := runtime.LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SnapshotDir != "" {
+		t.Fatalf("off must disable snapshots, got %q", cfg.SnapshotDir)
 	}
 }

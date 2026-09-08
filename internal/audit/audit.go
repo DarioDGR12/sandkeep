@@ -6,6 +6,7 @@ package audit
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"time"
 )
 
@@ -42,6 +43,9 @@ func SummarizeCode(code string) (sha string, n int, preview string) {
 	sum := sha256.Sum256([]byte(code))
 	sha = hex.EncodeToString(sum[:])
 	n = len(code)
+	if os.Getenv("WARDEN_AUDIT_PREVIEW") == "0" {
+		return sha, n, ""
+	}
 	preview = code
 	if len(preview) > MaxCodePreview {
 		preview = preview[:MaxCodePreview]

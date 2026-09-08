@@ -71,7 +71,7 @@ func run() error {
 		}
 		fcCfg.Cgroup = resources.CgroupV2{
 			Log:     log,
-			Require: os.Getenv("WARDEN_CGROUP_REQUIRED") == "1",
+			Require: cgroupRequired(listen),
 		}
 		tap := network.NewTAP(log)
 		if os.Getenv("WARDEN_NET_SUDO") == "1" || os.Getenv("WARDEN_JAILER_SUDO") == "1" {
@@ -86,6 +86,9 @@ func run() error {
 			fcCfg.RootfsPoolSize = 0
 		} else if fcCfg.RootfsPoolSize <= 0 {
 			fcCfg.RootfsPoolSize = 2
+		}
+		if err := jailerRequired(listen, fcCfg.Jailer); err != nil {
+			return err
 		}
 		rt = runtime.NewFirecrackerWithConfig(fcCfg)
 	}
@@ -114,12 +117,17 @@ func run() error {
 	}
 	mtls := tlsCfg != nil && tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert
 	jwksURL := strings.TrimSpace(os.Getenv("WARDEN_JWT_JWKS"))
+	jwtIssuer := strings.TrimSpace(os.Getenv("WARDEN_JWT_ISSUER"))
+	jwtAudience := envOr("WARDEN_JWT_AUDIENCE", "warden")
+	if err := api.CheckJWTConfig(jwksURL, jwtIssuer, jwtAudience); err != nil {
+		return err
+	}
 	var jwt *api.JWTVerifier
 	if jwksURL != "" {
 		jwt = &api.JWTVerifier{
 			JWKSURL:  jwksURL,
-			Issuer:   os.Getenv("WARDEN_JWT_ISSUER"),
-			Audience: envOr("WARDEN_JWT_AUDIENCE", "warden"),
+			Issuer:   jwtIssuer,
+			Audience: jwtAudience,
 		}
 	}
 	if err := api.CheckBindPolicy(listen, api.AuthPolicy{
@@ -147,7 +155,14 @@ func run() error {
 	httpCfg.RequireAll = os.Getenv("WARDEN_AUTH_REQUIRE_ALL") == "1"
 	httpCfg.MTLSSuffices = !httpCfg.RequireAll
 	httpCfg.Rate = buildRateLimit(listen)
+	httpCfg.HealthMinimal = os.Getenv("WARDEN_HEALTH_MINIMAL") == "1"
 	cgroupLimiter := resources.ProfileLimiter{Log: log}
+	bootTimeout := 20 * time.Second
+	if v := os.Getenv("WARDEN_BOOT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			bootTimeout = d
+		}
+	}
 	srv := api.NewServer(httpCfg, api.Dependencies{
 		Runtime:     rt,
 		Limiter:     cgroupLimiter,
@@ -158,7 +173,7 @@ func run() error {
 		AuditStrict: os.Getenv("WARDEN_AUDIT_STRICT") == "1",
 		Snapshots:   snaps,
 		Log:         log,
-		BootTimeout: 20 * time.Second,
+		BootTimeout: bootTimeout,
 		QueueWait:   queueWait,
 	})
 
@@ -209,6 +224,27 @@ func run() error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutCtx)
+}
+
+func jailerRequired(listen, jailer string) error {
+	if api.IsLoopbackAddr(listen) || os.Getenv("WARDEN_JAILER_OPTIONAL") == "1" {
+		return nil
+	}
+	if strings.TrimSpace(jailer) == "" {
+		return fmt.Errorf("refusing public firecracker bind without WARDEN_JAILER (set WARDEN_JAILER_OPTIONAL=1 only on a trusted host)")
+	}
+	return nil
+}
+
+func cgroupRequired(listen string) bool {
+	switch os.Getenv("WARDEN_CGROUP_REQUIRED") {
+	case "1":
+		return true
+	case "0":
+		return false
+	default:
+		return !api.IsLoopbackAddr(listen)
+	}
 }
 
 func buildRateLimit(listen string) *api.FixedWindow {

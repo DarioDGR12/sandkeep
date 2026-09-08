@@ -38,6 +38,9 @@ func TestAllowlistExactAndHost(t *testing.T) {
 	if f.Allows("evil.example:443") {
 		t.Fatal("unknown host must be denied")
 	}
+	if f.Allows("pypi.org:80") {
+		t.Fatal("pypi.org:443 must not allow port 80")
+	}
 }
 
 func TestRejectAllowDefault(t *testing.T) {

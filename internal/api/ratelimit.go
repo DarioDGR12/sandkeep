@@ -52,8 +52,14 @@ func (r *FixedWindow) Allow(key string) bool {
 	if r.hits == nil {
 		r.hits = make(map[string]*windowCounter)
 	}
+	const maxKeys = 2048
 	c := r.hits[key]
 	if c == nil || !now.Before(c.reset) {
+		r.evictExpiredLocked(now)
+		if c == nil && len(r.hits) >= maxKeys {
+			// Never evict an active window to make room for an attacker.
+			return false
+		}
 		c = &windowCounter{reset: now.Add(r.Window), n: 0}
 		r.hits[key] = c
 	}
@@ -61,13 +67,10 @@ func (r *FixedWindow) Allow(key string) bool {
 		return false
 	}
 	c.n++
-	if len(r.hits) > 4096 {
-		r.evictLocked(now)
-	}
 	return true
 }
 
-func (r *FixedWindow) evictLocked(now time.Time) {
+func (r *FixedWindow) evictExpiredLocked(now time.Time) {
 	for k, c := range r.hits {
 		if !now.Before(c.reset) {
 			delete(r.hits, k)
