@@ -160,6 +160,21 @@ func TestRenderNFTFailClosed(t *testing.T) {
 			t.Fatalf("forward chain must stay drop: %s", forward)
 		}
 	}
+	for _, cidr := range []string{"169.254.0.0/16", "127.0.0.0/8", "172.25.0.0/16", "172.27.0.0/16", "::1", "fe80::/10"} {
+		if !strings.Contains(script, cidr) || !strings.Contains(script, "drop") {
+			t.Fatalf("missing infra drop %s in %s", cidr, script)
+		}
+	}
+}
+
+func TestRenderNFTDropsAllowlistedMetadata(t *testing.T) {
+	link := &network.Link{Name: "wfc1", HostVeth: "hfc1", Table: "warden_fc_1", GuestIP: net.ParseIP("172.25.0.2")}
+	script := network.RenderNFT(link, []network.Dest{{IP: net.ParseIP("169.254.169.254")}})
+	drop := strings.Index(script, "ip daddr 169.254.0.0/16 drop")
+	accept := strings.Index(script, "169.254.169.254")
+	if drop < 0 || accept < 0 || drop > accept {
+		t.Fatalf("metadata drop must precede allow: %s", script)
+	}
 }
 
 func TestRenderNFTUsesHostVeth(t *testing.T) {

@@ -45,6 +45,13 @@ func RenderNFT(link *Link, allow []Dest) string {
 	b.WriteString("    type filter hook forward priority 0; policy drop;\n")
 	fmt.Fprintf(&b, "    iifname %q ct state established,related accept\n", dev)
 	fmt.Fprintf(&b, "    oifname %q ct state established,related accept\n", dev)
+	// Never forward to host/metadata/Warden plumbing, even if allowlisted.
+	for _, cidr := range []string{"169.254.0.0/16", "127.0.0.0/8", "172.25.0.0/16", "172.27.0.0/16"} {
+		fmt.Fprintf(&b, "    iifname %q ip daddr %s drop\n", dev, cidr)
+	}
+	for _, cidr := range []string{"::1", "fe80::/10"} {
+		fmt.Fprintf(&b, "    iifname %q ip6 daddr %s drop\n", dev, cidr)
+	}
 	if len(any4) > 0 {
 		fmt.Fprintf(&b, "    iifname %q ip daddr { %s } accept\n", dev, strings.Join(any4, ", "))
 	}

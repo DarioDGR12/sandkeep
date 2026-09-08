@@ -159,8 +159,10 @@ Variables de entorno:
 | `WARDEN_AUDIT_LOG` | `audit.jsonl` | Log JSONL |
 | `WARDEN_FC_BINARY` / `_KERNEL` / `_ROOTFS` | `assets/…` | Override de paths |
 | `WARDEN_CGROUP_REQUIRED` | `1` en bind público | `0`/`1` override; en loopback el default es best-effort |
-| `WARDEN_JAILER_NEWPID` | unset | `1` → jailer `--new-pid-ns` |
-| `WARDEN_JAILER` | unset | Path al binario jailer (vacío = Firecracker directo) |
+| `WARDEN_JAILER_NEWPID` | `1` si hay jailer | `0` apaga `--new-pid-ns`; `1` lo fuerza |
+| `WARDEN_JAILER_CGROUP` | `1` si hay jailer | `0` apaga `--cgroup-version 2` |
+| `WARDEN_JAILER_OPTIONAL` | unset | `1` permite bind público sin jailer (solo host de confianza) |
+| `WARDEN_JAILER` | unset | Path al binario jailer (vacío = Firecracker directo; bind público lo exige) |
 | `WARDEN_JAILER_SUDO` | unset | `1` para invocar el jailer con `sudo -n` |
 | `WARDEN_JAILER_UID` / `_GID` | usuario actual | Credenciales después del exec |
 | `WARDEN_NET_SUDO` | unset | `1` para `sudo -n` en `ip`/`nft` (también se activa si `WARDEN_JAILER_SUDO=1`) |
@@ -208,11 +210,11 @@ WARDEN_RUNTIME=firecracker go run ./cmd/warden
 
 Decisiones de fase 2 que importan:
 
-- **Sin TAP si allowlist vacía.** El guest no tiene L3. Si hay destinos: netns `warden-<id>`, TAP dentro del ns (`172.25.x.x/30`), veth uplink (`172.27.x.x/30`), NAT masquerade y nft **fail-closed en el veth del host**. `host:port` abre solo ese puerto (tcp+udp); un host sin puerto abre todos. `pypi.org:443` no implica `:80`.
-- **Jailer opcional.** `WARDEN_JAILER=assets/jailer` (y casi siempre `WARDEN_JAILER_SUDO=1`): chroot en `{work_dir}/firecracker/<id>/root`, drop a uid/gid no-root, `/dev/kvm` + `/dev/net/tun` dentro del jail. El VMM ve `/vmlinux`, `/rootfs.ext4`, `/api.sock`.
-- **seccomp del VMM ≠ seccomp del guest.** `configs/seccomp.json` se **valida** fail-closed al arrancar y en `ProfileLimiter`; no se aplica a ningún proceso (inyectarlo al VMM rompería KVM). El guest-agent pone `PR_SET_NO_NEW_PRIVS` y un **denylist** (mount, ptrace, kexec, bpf, …).
-- **cgroups.** Tras spawn se mueve el PID del VMM **y sus hijos**. En bind público el attach es fail-closed por defecto (`WARDEN_CGROUP_REQUIRED=0` lo relaja).
-- **rlimits + fence en el guest.** `RLIMIT_AS` / `NPROC` / `NOFILE`, un job a la vez, código máx. 64 KiB. El host rechaza respuestas vsock > ~2 MiB.
+- **Sin TAP si allowlist vacía.** El guest no tiene L3. Si hay destinos: nft fail-closed en el veth. `host:port` abre solo ese puerto. nft **siempre tira** 169.254/16 (metadata), 127.0.0.0/8, 172.25/16 + 172.27/16, `::1` y `fe80::/10`, aunque estén en la allowlist.
+- **Jailer.** En bind público Firecracker exige `WARDEN_JAILER` (`WARDEN_JAILER_OPTIONAL=1` lo relaja). Con jailer, `--new-pid-ns` y `--cgroup-version 2` van por defecto (`=0` los apaga).
+- **seccomp del VMM ≠ seccomp del guest.** `configs/seccomp.json` se valida y no se inyecta al VMM. El guest-agent aplica `no_new_privs` + denylist (mount, unshare, chroot, ptrace, io_uring, …).
+- **cgroups.** Tras spawn se mueve el PID del VMM. En bind público el attach es fail-closed por defecto.
+- **Guest job.** Env fijo (sin `LD_PRELOAD`), cwd `/tmp`, uid `nobody` si el agent es root, `RLIMIT_AS` / `NPROC` / `NOFILE` / `FSIZE` / `CORE=0`, `/tmp` tmpfs 64MiB noexec. Jobs sin `session_id` montan el rootfs **read-only**.
 - **Copia del rootfs:** pool de N clones precalentados (`data/vms/pool/`). Un miss clona en el momento. Nunca se devuelve un disco sucio al pool. `cp --reflink=auto` con fallback a copy. El kernel se hardlinkea. El store de sesión vive en `data/snapshots/` (nunca dentro del workdir de la VM).
 - **Snapshots.** Primera vez: `Full`. Siguientes: `Diff` (solo páginas sucias, `track_dirty_pages`) y rebase sparse sobre `vm.mem`. Restore: proceso fresco, logger, `PUT /snapshot/load` + `resume_vm` + dirty tracking. El TAP se recrea con los **mismos** nombres/IPs.
 - **KVM anidado.** En este Cloud Agent `KVM_CREATE_VCPU` hace oops. En un `.metal`: `WARDEN_ITEST=1 go test ./internal/runtime -run TestFirecrackerRealVM`.
@@ -233,7 +235,7 @@ go run ./cmd/warden
 - Authorization Code / login interactivo (el JWT es machine-to-machine RS256)
 - Multi-tenant / billing; el rate limit es por identidad de auth, no por plan
 - Diff snapshots sin rebase (el restore siempre carga el mem ya fusionado)
-- Aplicar `configs/seccomp.json` al VMM (rompería KVM). Tampoco hay filtro seccomp dentro del guest todavía.
+- Aplicar `configs/seccomp.json` al VMM (rompería KVM). El guest usa un denylist, no un allowlist de python/node.
 
 ## Licencia
 

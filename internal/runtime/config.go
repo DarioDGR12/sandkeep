@@ -127,6 +127,14 @@ func overlayEnv(cfg *Config) {
 	if os.Getenv("WARDEN_JAILER_NEWPID") == "1" {
 		cfg.NewPIDNS = true
 	}
+	if cfg.Jailer != "" {
+		if os.Getenv("WARDEN_JAILER_CGROUP") != "0" {
+			cfg.JailerCgroup = true
+		}
+		if os.Getenv("WARDEN_JAILER_NEWPID") != "0" {
+			cfg.NewPIDNS = true
+		}
+	}
 	if v, ok := os.LookupEnv("WARDEN_SNAPSHOT_DIR"); ok {
 		if v == "" || v == "off" || v == "0" {
 			cfg.SnapshotDir = ""

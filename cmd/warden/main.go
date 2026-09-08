@@ -87,6 +87,9 @@ func run() error {
 		} else if fcCfg.RootfsPoolSize <= 0 {
 			fcCfg.RootfsPoolSize = 2
 		}
+		if err := jailerRequired(listen, fcCfg.Jailer); err != nil {
+			return err
+		}
 		rt = runtime.NewFirecrackerWithConfig(fcCfg)
 	}
 
@@ -221,6 +224,16 @@ func run() error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutCtx)
+}
+
+func jailerRequired(listen, jailer string) error {
+	if api.IsLoopbackAddr(listen) || os.Getenv("WARDEN_JAILER_OPTIONAL") == "1" {
+		return nil
+	}
+	if strings.TrimSpace(jailer) == "" {
+		return fmt.Errorf("refusing public firecracker bind without WARDEN_JAILER (set WARDEN_JAILER_OPTIONAL=1 only on a trusted host)")
+	}
+	return nil
 }
 
 func cgroupRequired(listen string) bool {

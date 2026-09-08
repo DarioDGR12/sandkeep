@@ -36,6 +36,7 @@ type Request struct {
 	TimeoutS    int    `json:"timeout_s"`
 	MemoryBytes int64  `json:"memory_bytes,omitempty"`
 	PIDsMax     int64  `json:"pids_max,omitempty"`
+	DiskBytes   int64  `json:"disk_bytes,omitempty"`
 }
 
 // Response is the guest result. TimedOut means the guest killed the job.

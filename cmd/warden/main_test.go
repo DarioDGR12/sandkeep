@@ -36,6 +36,23 @@ func TestListenAddr(t *testing.T) {
 	}
 }
 
+func TestJailerRequiredPublicBind(t *testing.T) {
+	t.Setenv("WARDEN_JAILER_OPTIONAL", "")
+	if err := jailerRequired("0.0.0.0:8080", ""); err == nil {
+		t.Fatal("public firecracker without jailer must fail")
+	}
+	if err := jailerRequired("0.0.0.0:8080", "/usr/bin/jailer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := jailerRequired("127.0.0.1:8080", ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WARDEN_JAILER_OPTIONAL", "1")
+	if err := jailerRequired("0.0.0.0:8080", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIsLoopbackExported(t *testing.T) {
 	if !api.IsLoopbackAddr("127.0.0.1:1") {
 		t.Fatal("loopback")

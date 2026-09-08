@@ -173,6 +173,12 @@ func (f *Firecracker) bootOne(ctx context.Context, spec Spec, rec *snapshot.Reco
 	return inst, nil
 }
 
+// rootfsReadOnly is true for disposable jobs. Session VMs keep a writable
+// disk so dirty-page snapshots can persist guest files.
+func rootfsReadOnly(sessionID string) bool {
+	return strings.TrimSpace(sessionID) == ""
+}
+
 func denyNetworkOrFail(p network.Policy, tap network.TapFactory) error {
 	if p.DefaultPolicy == "" {
 		p = network.Default()
@@ -249,7 +255,7 @@ func (f *Firecracker) launch(ctx context.Context, spec Spec, inst *firecrackerIn
 		return inst.client.configure(ctx,
 			fcMachineConfig{VCPUCount: f.cfg.VCPUCount, MemSizeMiB: memMiB, SMT: false, TrackDirtyPages: true},
 			fcBootSource{KernelImagePath: paths.guestKernel, BootArgs: bootArgs},
-			fcDrive{DriveID: "rootfs", PathOnHost: paths.guestRootfs, IsRootDevice: true, IsReadOnly: false},
+			fcDrive{DriveID: "rootfs", PathOnHost: paths.guestRootfs, IsRootDevice: true, IsReadOnly: rootfsReadOnly(spec.SessionID)},
 			fcVsock{GuestCID: inst.cid, UDSPath: paths.guestVsock},
 			&fcLogger{LogPath: paths.guestLog, Level: "Info", ShowLevel: true},
 			nic,
@@ -335,6 +341,7 @@ func (i *firecrackerInstance) Execute(ctx context.Context, req ExecRequest) (Res
 		TimeoutS:    int(req.Timeout / time.Second),
 		MemoryBytes: i.limits.MemoryBytes,
 		PIDsMax:     i.limits.PIDsMax,
+		DiskBytes:   i.limits.DiskBytes,
 	}); err != nil {
 		return Result{}, err
 	}

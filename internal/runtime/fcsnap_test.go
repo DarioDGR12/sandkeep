@@ -42,6 +42,15 @@ func TestNetworkMatches(t *testing.T) {
 	}
 }
 
+func TestRootfsReadOnlyEphemeral(t *testing.T) {
+	if !rootfsReadOnly("") {
+		t.Fatal("ephemeral VM rootfs must be read-only")
+	}
+	if rootfsReadOnly("agent-1") {
+		t.Fatal("session VM rootfs must stay writable")
+	}
+}
+
 func TestTapIDStableForSession(t *testing.T) {
 	if tapID("fc-9", "agent") != "sagent" {
 		t.Fatal(tapID("fc-9", "agent"))

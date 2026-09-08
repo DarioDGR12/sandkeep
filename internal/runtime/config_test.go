@@ -65,6 +65,27 @@ func TestBootRejectsAllowlist(t *testing.T) {
 	}
 }
 
+func TestLoadConfigJailerDefaultsPIDAndCgroup(t *testing.T) {
+	t.Setenv("WARDEN_JAILER", "/usr/bin/jailer")
+	t.Setenv("WARDEN_JAILER_CGROUP", "")
+	t.Setenv("WARDEN_JAILER_NEWPID", "")
+	cfg, err := runtime.LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.JailerCgroup || !cfg.NewPIDNS {
+		t.Fatalf("jailer should default cgroup+newpid: %+v", cfg)
+	}
+	t.Setenv("WARDEN_JAILER_NEWPID", "0")
+	cfg, err = runtime.LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NewPIDNS {
+		t.Fatal("WARDEN_JAILER_NEWPID=0 must disable")
+	}
+}
+
 func TestLoadConfigEnvOverlay(t *testing.T) {
 	t.Setenv("WARDEN_FC_BINARY", "/opt/fc")
 	t.Setenv("WARDEN_SNAPSHOT_DIR", "/var/lib/warden/snaps")
